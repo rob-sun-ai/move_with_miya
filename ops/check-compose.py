@@ -95,6 +95,18 @@ for upstream in ('backend', 'frontend', 'user-service'):
         f'nginx waits for a healthy {upstream}',
     )
 
+if os.path.exists('ops/observability/prometheus.yml'):
+    with open('ops/observability/prometheus.yml', encoding='utf-8') as file:
+        prometheus = file.read()
+    for app in APPS:
+        if app == 'frontend':
+            continue
+        target = f"'{app}:{services[app]['expose'][0]}'"
+        check(
+            target in prometheus,
+            f'Prometheus scrapes {app} on its exposed port',
+        )
+
 if failures:
     sys.exit(f'{len(failures)} compose check(s) failed')
 print('Compose checks passed.')

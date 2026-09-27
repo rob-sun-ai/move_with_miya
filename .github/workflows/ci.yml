@@ -169,6 +169,17 @@ jobs:
             -v /tmp/fullchain.pem:/etc/nginx/tls/fullchain.pem:ro \
             -v /tmp/privkey.pem:/etc/nginx/tls/privkey.pem:ro \
             nginx:1.31.7-alpine nginx -t
+      - name: Validate monitoring configuration
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/ops/observability:/etc/prometheus:ro" prom/prometheus:v3.5.0 \
+            check config /etc/prometheus/prometheus.yml
+          docker run --rm \
+            -v "$PWD/ops/observability/loki.yaml:/etc/loki/config.yaml:ro" \
+            grafana/loki:3.5.0 -config.file=/etc/loki/config.yaml -verify-config
+          docker run --rm \
+            -v "$PWD/ops/observability/otel-collector.yaml:/cfg.yaml:ro" \
+            otel/opentelemetry-collector-contrib:0.123.0 validate --config=/cfg.yaml
       - name: Check Compose invariants
         run: python3 ops/check-compose.py
       - name: Exercise nginx routing
