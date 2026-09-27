@@ -162,11 +162,25 @@ export class ClassesController {
       id,
       status: 'Canceled',
     });
-    await this.rpcRegistrations('cancel_class_registrations', {
-      classId: id,
-      reason: body.reason?.trim() || 'Class canceled',
-      source: 'class-cancellation',
-    });
+    try {
+      await this.rpcRegistrations('cancel_class_registrations', {
+        classId: id,
+        reason: body.reason?.trim() || 'Class canceled',
+        source: 'class-cancellation',
+      });
+    } catch (error) {
+      // The databases are separate. Compensate when the dependent lifecycle
+      // operation cannot be completed so the class is not left half-canceled.
+      try {
+        await this.rpcClasses('update_class', { id, status: cls.status });
+      } catch {
+        // The original error remains the useful response; reconciliation can
+        // retry the class-wide cancellation if compensation also fails.
+      }
+      throw error;
+    }
+    // Refund queueing is idempotent, so an admin can retry the cancellation
+    // if this step fails.
     if (this.stripeService) await this.stripeService.refundClassPayments(id);
     return updated;
   }

@@ -1,5 +1,5 @@
 import { ConflictException, ForbiddenException } from '@nestjs/common';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import Stripe from 'stripe';
 import { StripeService } from './stripe.service';
 
@@ -13,8 +13,10 @@ describe('StripeService', () => {
   let registrationClient: { send: jest.Mock };
   let classesClient: { send: jest.Mock };
   let stripeMock: {
-    checkout: { sessions: { create: jest.Mock; retrieve: jest.Mock } };
-    refunds: { create: jest.Mock };
+    checkout: {
+      sessions: { create: jest.Mock; retrieve: jest.Mock; expire: jest.Mock };
+    };
+    refunds: { create: jest.Mock; retrieve: jest.Mock; list: jest.Mock };
   };
 
   beforeEach(() => {
@@ -28,9 +30,14 @@ describe('StripeService', () => {
             url: 'https://checkout.test/session',
           }),
           retrieve: jest.fn(),
+          expire: jest.fn().mockResolvedValue({}),
         },
       },
-      refunds: { create: jest.fn() },
+      refunds: {
+        create: jest.fn(),
+        retrieve: jest.fn(),
+        list: jest.fn().mockResolvedValue({ data: [] }),
+      },
     };
     (Stripe as unknown as jest.Mock).mockImplementation(() => stripeMock);
     process.env.PUBLIC_APP_URL = 'https://app.test';
@@ -108,6 +115,43 @@ describe('StripeService', () => {
     expect(registrationClient.send).toHaveBeenCalledWith(
       { cmd: 'attach_checkout_session' },
       { paymentId: 'payment-1', stripeCheckoutSessionId: 'cs_test' },
+    );
+  });
+
+  it('expires the Stripe session when it cannot be linked to the payment', async () => {
+    classesClient.send.mockReturnValue(
+      of({
+        id: 1,
+        name: 'Morning Flow',
+        cost: '15.50',
+        capacity: 5,
+        startDate: '2099-01-01T10:00:00.000Z',
+        endDate: '2099-01-01T11:00:00.000Z',
+        status: 'Scheduled',
+      }),
+    );
+    jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(
+        new Response(JSON.stringify({ banned: false }), { status: 200 }),
+      );
+    registrationClient.send.mockImplementation(({ cmd }: { cmd: string }) =>
+      cmd === 'attach_checkout_session'
+        ? throwError(() => ({ statusCode: 500, message: 'db down' }))
+        : of(
+            cmd === 'create_or_get_pending_payment'
+              ? { id: 'payment-1', status: 'Pending' }
+              : {},
+          ),
+    );
+
+    await expect(service.createCheckoutSession('user-1', 1)).rejects.toThrow(
+      'Unable to start Stripe Checkout',
+    );
+    expect(stripeMock.checkout.sessions.expire).toHaveBeenCalledWith('cs_test');
+    expect(registrationClient.send).toHaveBeenCalledWith(
+      { cmd: 'mark_payment_failed' },
+      expect.objectContaining({ id: 'payment-1' }),
     );
   });
 
@@ -427,6 +471,42 @@ describe('StripeService', () => {
     expect(registrationClient.send).not.toHaveBeenCalledWith(
       { cmd: 'complete_payment_refund' },
       expect.anything(),
+    );
+  });
+
+  it('reuses a refund already issued for the payment instead of refunding twice', async () => {
+    const payment = {
+      id: 'payment-1',
+      amountCents: 2500,
+      refundAmountCents: 1250,
+      refundStatus: 'Failed',
+      refundPercentage: 50,
+      stripePaymentIntentId: 'pi_1',
+    };
+    registrationClient.send.mockImplementation(({ cmd }: { cmd: string }) =>
+      of(cmd === 'get_payment_by_id' ? payment : {}),
+    );
+    stripeMock.refunds.list.mockResolvedValue({
+      data: [
+        {
+          id: 're_existing',
+          amount: 1250,
+          status: 'succeeded',
+          metadata: { paymentId: 'payment-1' },
+        },
+      ],
+    });
+
+    await service.refundPayment('payment-1');
+
+    expect(stripeMock.refunds.create).not.toHaveBeenCalled();
+    expect(registrationClient.send).toHaveBeenCalledWith(
+      { cmd: 'complete_payment_refund' },
+      {
+        paymentId: 'payment-1',
+        stripeRefundId: 're_existing',
+        amountCents: 1250,
+      },
     );
   });
 

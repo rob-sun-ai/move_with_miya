@@ -6,6 +6,7 @@ import {
   Delete,
   Get,
   Inject,
+  Logger,
   NotFoundException,
   Param,
   ParseIntPipe,
@@ -25,6 +26,7 @@ import { StaffGuard } from '../common/guards/staff.guard';
 import { sendRpc } from '../common/rpc';
 import { UpdateRegistrationDto } from './dto/update-registration.dto';
 import { StripeService } from './stripe.service';
+import { fetchActiveUser } from '../common/user-verification';
 
 interface Registration {
   id: number;
@@ -50,6 +52,8 @@ interface ClassSummary {
 
 @Controller('registration')
 export class RegistrationController {
+  private readonly logger = new Logger(RegistrationController.name);
+
   constructor(
     @Inject('REGISTRATION_SERVICE')
     private readonly registrationClient: ClientProxy,
@@ -80,6 +84,23 @@ export class RegistrationController {
     if (tiers.length === 0) return 0;
     return tiers.sort((a, b) => b.hoursBeforeStart - a.hoursBeforeStart)[0]
       .percentage;
+  }
+
+  /**
+   * The cancellation has already committed and queued the refund. A failed
+   * Stripe call is retried by StripeService's refund sweep, so it must not
+   * fail the request.
+   */
+  private async refundAfterCancellation(paymentId: string) {
+    try {
+      await this.stripeService?.refundPayment(paymentId);
+    } catch (error) {
+      this.logger.warn(
+        `Refund for payment ${paymentId.slice(0, 8)} will be retried: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   private rpc<T = unknown>(cmd: string, payload: object) {
@@ -255,29 +276,10 @@ export class RegistrationController {
       throw new ServiceUnavailableException('Class capacity is invalid');
     }
 
-    const userServiceUrl =
-      process.env.USER_SERVICE_URL || 'http://localhost:3003';
-    let userResponse: Response;
-    try {
-      userResponse = await fetch(`${userServiceUrl}/users/${userId}`, {
-        signal: AbortSignal.timeout(5000),
-      });
-    } catch {
-      throw new ServiceUnavailableException('User service unreachable');
-    }
-    if (userResponse.status >= 500) {
-      throw new ServiceUnavailableException('User service error');
-    }
-    if (!userResponse.ok) {
-      throw new UnauthorizedException('Unable to verify user');
-    }
-    const user = (await userResponse.json()) as {
-      banned?: boolean;
-      yogaExperience?: string | null;
-    };
-    if (user.banned) {
-      throw new ForbiddenException('User is banned');
-    }
+    const user = await fetchActiveUser(
+      process.env.USER_SERVICE_URL || 'http://localhost:3003',
+      userId,
+    );
     if (cls.isPrivate && !user.yogaExperience?.trim()) {
       throw new ForbiddenException(
         'Yoga experience is required for this class',
@@ -332,10 +334,8 @@ export class RegistrationController {
         refundPercentage: this.refundPercentageForMemberCancellation(cls),
       },
     );
-    if (result.refundPaymentId && this.stripeService) {
-      await this.stripeService
-        .refundPayment(result.refundPaymentId)
-        .catch(() => undefined);
+    if (result.refundPaymentId) {
+      await this.refundAfterCancellation(result.refundPaymentId);
     }
     return result;
   }
@@ -365,10 +365,8 @@ export class RegistrationController {
         refundPercentage: body.refundPercentage ?? 100,
       },
     );
-    if (result.refundPaymentId && this.stripeService) {
-      await this.stripeService
-        .refundPayment(result.refundPaymentId)
-        .catch(() => undefined);
+    if (result.refundPaymentId) {
+      await this.refundAfterCancellation(result.refundPaymentId);
     }
     return result;
   }

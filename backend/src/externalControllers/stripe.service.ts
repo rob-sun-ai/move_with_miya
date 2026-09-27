@@ -14,6 +14,11 @@ import { ConfigService } from '@nestjs/config';
 import { ClientProxy } from '@nestjs/microservices';
 import { firstValueFrom } from 'rxjs';
 import Stripe from 'stripe';
+import { fetchActiveUser } from '../common/user-verification';
+
+// Stripe rejects Checkout sessions that expire less than 30 minutes after
+// creation; keep a margin for the RPC round-trips before the create call.
+const CHECKOUT_SESSION_TTL_MS = 35 * 60 * 1000;
 
 interface ClassRecord {
   id: number;
@@ -119,28 +124,11 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async assertUser(userId: string) {
-    const userServiceUrl =
-      this.config.get<string>('USER_SERVICE_URL') || 'http://localhost:3003';
-    let response: Response;
-    try {
-      response = await fetch(
-        `${userServiceUrl}/users/${encodeURIComponent(userId)}`,
-        { signal: AbortSignal.timeout(5000) },
-      );
-    } catch {
-      throw new ServiceUnavailableException('User service unreachable');
-    }
-    if (response.status >= 500) {
-      throw new ServiceUnavailableException('User service error');
-    }
-    if (!response.ok) throw new ForbiddenException('Unable to verify user');
-    const user = (await response.json()) as {
-      banned?: boolean;
-      yogaExperience?: string | null;
-    };
-    if (user.banned) throw new ForbiddenException('User is banned');
-    return user;
+  private assertUser(userId: string) {
+    return fetchActiveUser(
+      this.config.get<string>('USER_SERVICE_URL') || 'http://localhost:3003',
+      userId,
+    );
   }
 
   private amountToCents(value: string | number) {
@@ -198,7 +186,7 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
     const currency = this.config
       .get<string>('STRIPE_CURRENCY', 'usd')
       .toLowerCase();
-    const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
+    const expiresAt = new Date(Date.now() + CHECKOUT_SESSION_TTL_MS);
     let payment = await this.rpc<PaymentRecord>(
       'create_or_get_pending_payment',
       {
@@ -255,8 +243,9 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
     }
 
     const idempotencyKey = `checkout:${userId}:${classId}:${payment.id}`;
+    let session: Stripe.Checkout.Session | undefined;
     try {
-      const session = await this.stripe.checkout.sessions.create(
+      session = await this.stripe.checkout.sessions.create(
         {
           mode: 'payment',
           client_reference_id: payment.id,
@@ -291,6 +280,13 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
       });
       return { url: session.url, paymentId: payment.id };
     } catch (error) {
+      // A session we cannot link to the payment would be payable but could
+      // never be fulfilled, so close it before failing the payment.
+      if (session) {
+        await this.stripe.checkout.sessions
+          .expire(session.id)
+          .catch(() => undefined);
+      }
       await this.rpc('mark_payment_failed', {
         id: payment.id,
         error:
@@ -308,6 +304,16 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
       stripeCheckoutSessionId: sessionId,
       userId,
     });
+  }
+
+  constructWebhookEvent(rawBody: Buffer, signature: string): Stripe.Event {
+    const secret = this.config.get<string>('STRIPE_WEBHOOK_SECRET');
+    if (!secret) throw new BadRequestException('Invalid Stripe webhook');
+    try {
+      return this.stripe.webhooks.constructEvent(rawBody, signature, secret);
+    } catch {
+      throw new BadRequestException('Invalid Stripe webhook signature');
+    }
   }
 
   async handleWebhook(event: Stripe.Event) {
@@ -502,41 +508,15 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
     if (!payment.stripePaymentIntentId || !payment.refundAmountCents) {
       throw new ConflictException('Payment cannot be refunded yet');
     }
+    const refundAmountCents = payment.refundAmountCents;
+
+    let refund: Stripe.Refund;
     try {
-      const refund = await this.stripe.refunds.create(
-        {
-          payment_intent: payment.stripePaymentIntentId,
-          amount: payment.refundAmountCents,
-          reason: 'requested_by_customer',
-          metadata: { paymentId },
-        },
-        { idempotencyKey: `refund:${paymentId}` },
+      refund = await this.findOrCreateRefund(
+        payment,
+        payment.stripePaymentIntentId,
+        refundAmountCents,
       );
-      if (refund.amount !== payment.refundAmountCents) {
-        await this.rpc('fail_payment_refund', {
-          paymentId,
-          error: 'Stripe refund amount did not match the requested amount',
-        });
-        throw new ConflictException('Stripe refund amount did not match');
-      }
-      if (refund.status === 'succeeded') {
-        return this.rpc('complete_payment_refund', {
-          paymentId,
-          stripeRefundId: refund.id,
-          amountCents: payment.refundAmountCents,
-        });
-      }
-      if (refund.status === 'pending') {
-        return this.rpc('record_payment_refund', {
-          paymentId,
-          stripeRefundId: refund.id,
-        });
-      }
-      await this.rpc('fail_payment_refund', {
-        paymentId,
-        error: `Stripe refund status: ${refund.status}`,
-      });
-      throw new ServiceUnavailableException('Stripe refund did not succeed');
     } catch (error) {
       await this.rpc('fail_payment_refund', {
         paymentId,
@@ -544,6 +524,66 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
       }).catch(() => undefined);
       throw new ServiceUnavailableException('Unable to issue Stripe refund');
     }
+
+    if (refund.amount !== refundAmountCents) {
+      await this.rpc('fail_payment_refund', {
+        paymentId,
+        error: 'Stripe refund amount did not match the requested amount',
+      });
+      throw new ConflictException('Stripe refund amount did not match');
+    }
+    if (refund.status === 'succeeded') {
+      return this.rpc('complete_payment_refund', {
+        paymentId,
+        stripeRefundId: refund.id,
+        amountCents: refundAmountCents,
+      });
+    }
+    if (refund.status === 'pending') {
+      return this.rpc('record_payment_refund', {
+        paymentId,
+        stripeRefundId: refund.id,
+      });
+    }
+    await this.rpc('fail_payment_refund', {
+      paymentId,
+      error: `Stripe refund status: ${refund.status}`,
+    });
+    throw new ServiceUnavailableException('Stripe refund did not succeed');
+  }
+
+  /**
+   * Reuses the refund already issued for this payment so retries can never
+   * refund the customer twice, even after the idempotency key has expired.
+   */
+  private async findOrCreateRefund(
+    payment: PaymentRecord,
+    paymentIntentId: string,
+    amountCents: number,
+  ): Promise<Stripe.Refund> {
+    if (payment.stripeRefundId) {
+      return this.stripe.refunds.retrieve(payment.stripeRefundId);
+    }
+    const existing = await this.stripe.refunds.list({
+      payment_intent: paymentIntentId,
+      limit: 100,
+    });
+    const issued = existing.data.find(
+      (refund) =>
+        refund.metadata?.paymentId === payment.id &&
+        refund.status !== 'failed' &&
+        refund.status !== 'canceled',
+    );
+    if (issued) return issued;
+    return this.stripe.refunds.create(
+      {
+        payment_intent: paymentIntentId,
+        amount: amountCents,
+        reason: 'requested_by_customer',
+        metadata: { paymentId: payment.id },
+      },
+      { idempotencyKey: `refund:${payment.id}:${amountCents}` },
+    );
   }
 
   async refundClassPayments(classId: number) {

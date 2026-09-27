@@ -1,4 +1,4 @@
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import { ClassesController } from './ClassesController';
 
 describe('ClassesController', () => {
@@ -139,6 +139,22 @@ describe('ClassesController', () => {
         reason: 'Instructor unavailable',
         source: 'class-cancellation',
       },
+    );
+  });
+
+  it('restores the class status when registrations cannot be canceled', async () => {
+    const cls = { id: 2, status: 'Scheduled' };
+    classesClient.send.mockImplementation(({ cmd }: { cmd: string }) =>
+      of(cmd === 'get_class' ? cls : { ...cls, status: 'Canceled' }),
+    );
+    registrationClient.send.mockReturnValue(
+      throwError(() => ({ statusCode: 503, message: 'down' })),
+    );
+
+    await expect(controller.cancelClass(2, {})).rejects.toBeDefined();
+    expect(classesClient.send).toHaveBeenLastCalledWith(
+      { cmd: 'update_class' },
+      { id: 2, status: 'Scheduled' },
     );
   });
 });
