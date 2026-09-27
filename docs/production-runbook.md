@@ -10,7 +10,7 @@
 6. Register the Stripe webhook at `/api/checkout/webhook`.
 7. Set a strong `GRAFANA_ADMIN_PASSWORD`; do not expose Grafana's container port publicly.
 
-The populated environment file must live outside the repository with restrictive file permissions (`chmod 600`).
+The populated environment file must live outside the repository with restrictive file permissions (`chmod 600`). Run `./ops/preflight-production.sh` (with the file's variables exported) before the first deployment; `deploy.sh` runs it on every deploy.
 
 `POSTGRES_PASSWORD` and `RABBITMQ_PASS` are embedded in connection URLs, so they must be URL-safe (letters, digits, `-`, `_`, `.`, `~`); `openssl rand -hex 32` generates a suitable one. `RELEASE_VERSION` is required and tags every image, so set it to the commit being deployed.
 
@@ -140,3 +140,33 @@ compose up -d --no-deps --force-recreate nginx
 Files that are not in `BACKUP_DIR` are fetched from `RESTORE_REMOTE`, a remote using the read key (the server's own key can only upload). Checksums are verified before anything is restored. Each dump is restored in a single transaction into a fresh `<database>_restore` database; only after all three succeed are the live databases dropped (`WITH (FORCE)`, closing any remaining connections) and replaced. A failed restore therefore leaves production data as it was (a leftover `*_restore` database is dropped by the next attempt), and tables created by migrations after the backup do not survive a successful one. Remove the read key and the private age key from the server afterwards.
 
 The backup and restore scripts are tested by `ops/tests/run.sh` (real age and rclone, with a Docker test double), which CI runs together with shellcheck.
+
+## Deploy
+
+```bash
+ENV_FILE=/path/to/.env.production ./ops/deploy.sh
+```
+
+The deployment runs the preflight checks, builds images tagged `move-with-miya/<service>:<git-sha>` for the checked-out commit, starts infrastructure, takes an encrypted backup, runs each Prisma migration as a one-shot job, starts application services, reloads nginx, starts the monitoring and alerting services, and performs public health checks. A failed backup or migration stops the rollout. `RELEASE_VERSION` is written back to the environment file only after the smoke checks pass.
+
+The manual GitHub Actions workflow requires environment-scoped `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_PATH`, `DEPLOY_ENV_FILE`, `DEPLOY_SSH_KEY`, and `DEPLOY_KNOWN_HOSTS` secrets. It supports both deploy and application rollback operations.
+
+## Rollback
+
+```bash
+ROLLBACK_VERSION=<previous-sha> ENV_FILE=/path/to/.env.production ./ops/rollback.sh
+```
+
+Rollback restarts the application services on the images previously built on this host for `<previous-sha>`; it fails if those images are not present (deploy that commit instead). Database migrations are not automatically reversed, and rollback does not run the older release's migration jobs. For an incompatible schema change, restore the pre-deploy backup (see "Recovering production").
+
+## Authenticated smoke checklist
+
+- Complete Google login through the HTTPS proxy and confirm the session cookie is secure.
+- Load a class and class detail page.
+- Update a profile field.
+- Submit a test contact form and verify persistence/email behavior.
+- Create and cancel a free registration.
+- Complete Stripe test checkout and confirm webhook fulfillment.
+- Confirm an admin can view the observability tab.
+- Confirm a non-admin receives `403` for the observability endpoint.
+- Confirm Grafana dashboards, a test alert email, the latest backup in B2, and deployment logs are available.

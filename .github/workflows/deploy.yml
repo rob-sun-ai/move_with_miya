@@ -1,0 +1,83 @@
+name: Deploy production
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Deployment operation
+        required: true
+        type: choice
+        options:
+          - deploy
+          - rollback
+      release_version:
+        description: Git SHA to deploy or restore
+        required: true
+        type: string
+      environment:
+        description: GitHub environment
+        required: true
+        type: environment
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Deploy or rollback on host
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_ENV_FILE: ${{ secrets.DEPLOY_ENV_FILE }}
+          OPERATION: ${{ inputs.operation }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" sh -s -- \
+            "$OPERATION" "$RELEASE_VERSION" "$DEPLOY_PATH" "$DEPLOY_ENV_FILE" <<'REMOTE'
+          set -eu
+          operation=$1
+          release_version=$2
+          deploy_path=$3
+          deploy_env_file=$4
+
+          case "$release_version" in
+            *[!A-Fa-f0-9]*|'')
+              echo 'release_version must be a Git SHA' >&2
+              exit 1
+              ;;
+          esac
+          [ "${#release_version}" -eq 40 ] || {
+            echo 'release_version must be a 40-character Git SHA' >&2
+            exit 1
+          }
+
+          cd "$deploy_path"
+          if [ "$operation" = deploy ]; then
+            git fetch --tags origin "$release_version"
+            git checkout --detach "$release_version"
+            ENV_FILE="$deploy_env_file" RELEASE_VERSION="$release_version" ./ops/deploy.sh
+          elif [ "$operation" = rollback ]; then
+            ENV_FILE="$deploy_env_file" ROLLBACK_VERSION="$release_version" ./ops/rollback.sh
+          else
+            echo 'Unsupported deployment operation' >&2
+            exit 1
+          fi
+          REMOTE

@@ -69,3 +69,28 @@ require_command() {
     }
   done
 }
+
+# Usage: assert_git_sha NAME VALUE
+assert_git_sha() {
+  case "$2" in
+    *[!A-Fa-f0-9]*|'') echo "$1 must be a 40-character Git SHA" >&2; exit 1 ;;
+  esac
+  [ "${#2}" -eq 40 ] || { echo "$1 must be a 40-character Git SHA" >&2; exit 1; }
+}
+
+# nginx resolves upstream hostnames once at startup, so reload it after
+# application containers are recreated with new addresses.
+reload_nginx() {
+  compose up -d nginx
+  compose exec -T nginx nginx -s reload
+}
+
+# Records the running release in the env file so later compose commands and
+# rollbacks resolve the same image tags.
+persist_release_version() {
+  if grep -q '^RELEASE_VERSION=' "$ENV_FILE"; then
+    sed -i "s/^RELEASE_VERSION=.*/RELEASE_VERSION=$1/" "$ENV_FILE"
+  else
+    printf 'RELEASE_VERSION=%s\n' "$1" >> "$ENV_FILE"
+  fi
+}
