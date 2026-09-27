@@ -5,12 +5,112 @@ rule_files:
 evaluation_interval: 1m
 
 tests:
-  - interval: 1m
+  - name: ServiceDown fires for a service whose metrics stay unreachable
+    interval: 1m
+    input_series:
+      - series: 'up{job="backend", instance="backend:3000"}'
+        values: '1 0 0 0 0'
+      - series: 'up{job="user-service", instance="user-service:3001"}'
+        values: '1 1 1 1 1'
+      - series: 'up{job="prometheus", instance="prometheus:9090"}'
+        values: '0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ServiceDown
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: backend
+              instance: backend:3000
+            exp_annotations:
+              summary: 'backend metrics endpoint is unavailable'
+
+  - name: HighHttpErrorRate fires even on a quiet site
+    interval: 1m
+    input_series:
+      # Two failing requests a minute: 100% errors at 0.03 requests/second.
+      - series: 'move_with_miya_http_requests_total{method="GET", route="/classes", status_code="500"}'
+        values: '0+2x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HighHttpErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'HTTP 5xx rate is above 5%'
+
+  - name: HighHttpErrorRate ignores a normal error rate and tiny volumes
+    interval: 1m
+    input_series:
+      # 1% errors on steady traffic.
+      - series: 'move_with_miya_http_requests_total{method="GET", route="/classes", status_code="200"}'
+        values: '0+99x20'
+      - series: 'move_with_miya_http_requests_total{method="GET", route="/classes", status_code="502"}'
+        values: '0+1x20'
+      # A single failed request on an otherwise idle service.
+      - series: 'move_with_miya_http_requests_total{method="POST", route="/contact", status_code="500"}'
+        values: '0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: HighHttpErrorRate
+        exp_alerts: []
+
+  - name: HighHttpErrorRate stays quiet without traffic
+    interval: 1m
+    input_series:
+      - series: 'move_with_miya_http_requests_total{method="GET", route="/classes", status_code="500"}'
+        values: '3x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: HighHttpErrorRate
+        exp_alerts: []
+
+  - name: HighHttpLatency fires when p95 stays above one second
+    interval: 1m
+    input_series:
+      - series: 'move_with_miya_http_request_duration_seconds_bucket{le="0.5"}'
+        values: '0x20'
+      - series: 'move_with_miya_http_request_duration_seconds_bucket{le="1"}'
+        values: '0x20'
+      - series: 'move_with_miya_http_request_duration_seconds_bucket{le="2"}'
+        values: '0+10x20'
+      - series: 'move_with_miya_http_request_duration_seconds_bucket{le="+Inf"}'
+        values: '0+10x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: HighHttpLatency
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: HighHttpLatency
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: '95th percentile HTTP latency is above one second'
+
+  - name: HighHttpLatency stays quiet for fast requests
+    interval: 1m
+    input_series:
+      - series: 'move_with_miya_http_request_duration_seconds_bucket{le="0.5"}'
+        values: '0+10x20'
+      - series: 'move_with_miya_http_request_duration_seconds_bucket{le="1"}'
+        values: '0+10x20'
+      - series: 'move_with_miya_http_request_duration_seconds_bucket{le="+Inf"}'
+        values: '0+10x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: HighHttpLatency
+        exp_alerts: []
+
+  - name: RefundsNeedAttention fires after five minutes and resolves
+    interval: 1m
     input_series:
       - series: 'move_with_miya_refunds_needing_attention{job="registration-service"}'
-        values: '0 1 1 1 1 1 1 1'
-      - series: 'move_with_miya_stripe_webhook_events_failed{job="registration-service"}'
-        values: '0x20'
+        values: '0 1 1 1 1 1 1 1 0 0'
     alert_rule_test:
       - eval_time: 3m
         alertname: RefundsNeedAttention
@@ -24,6 +124,25 @@ tests:
             exp_annotations:
               summary: '1 refund(s) exhausted automatic retries'
               description: 'Open the admin Payments tab, read the refund error, then retry the refund or resolve it in the Stripe dashboard.'
-      - eval_time: 20m
+      - eval_time: 9m
+        alertname: RefundsNeedAttention
+        exp_alerts: []
+
+  - name: StripeWebhookProcessingFailed fires after fifteen minutes
+    interval: 1m
+    input_series:
+      - series: 'move_with_miya_stripe_webhook_events_failed{job="registration-service"}'
+        values: '0 2x20'
+    alert_rule_test:
+      - eval_time: 10m
         alertname: StripeWebhookProcessingFailed
         exp_alerts: []
+      - eval_time: 17m
+        alertname: StripeWebhookProcessingFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: registration-service
+            exp_annotations:
+              summary: '2 Stripe webhook event(s) failed processing'
+              description: 'Stripe retries failed deliveries for up to three days. Check backend logs for the event; after fixing the cause, resend it from the Stripe dashboard if retries have stopped.'

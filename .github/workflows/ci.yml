@@ -154,17 +154,13 @@ jobs:
           persist-credentials: false
       - name: Validate production Compose interpolation
         run: docker compose -f docker-compose.prod.yml config --quiet
-      - name: Validate Prometheus rules and Alertmanager config
+      - name: Test alert rules
         run: |
           docker run --rm --entrypoint sh \
             -v "$PWD/ops/observability:/cfg:ro" -w /cfg prom/prometheus:v3.5.0 \
             -c 'promtool check rules alerts.yml && promtool test rules alerts.test.yml'
-          sed -e 's/__ALERT_EMAIL_TO__/alerts@example.test/' \
-            -e 's/__ALERT_EMAIL_FROM__/ci@example.test/' \
-            ops/observability/alertmanager.yml.tmpl > /tmp/alertmanager.yml
-          docker run --rm --entrypoint amtool \
-            -v /tmp/alertmanager.yml:/tmp/alertmanager.yml:ro \
-            prom/alertmanager:v0.28.1 check-config /tmp/alertmanager.yml
+      - name: Test the Alertmanager service
+        run: ./ops/observability/test-alertmanager.sh
       - name: Validate nginx configuration
         run: |
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 \

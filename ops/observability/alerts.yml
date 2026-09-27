@@ -9,7 +9,9 @@ groups:
         annotations:
           summary: '{{ $labels.job }} metrics endpoint is unavailable'
       - alert: HighHttpErrorRate
-        expr: sum(rate(move_with_miya_http_requests_total{status_code=~"5.."}[5m])) / clamp_min(sum(rate(move_with_miya_http_requests_total[5m])), 1) > 0.05
+        # A true ratio, ignoring windows with fewer than five requests so a
+        # single error on a quiet site does not page anyone.
+        expr: (sum(rate(move_with_miya_http_requests_total{status_code=~"5.."}[5m])) / sum(rate(move_with_miya_http_requests_total[5m])) > 0.05) and sum(increase(move_with_miya_http_requests_total[5m])) >= 5
         for: 5m
         labels:
           severity: warning

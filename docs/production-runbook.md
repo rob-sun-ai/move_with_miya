@@ -62,7 +62,7 @@ Prometheus evaluates [ops/observability/alerts.yml](../ops/observability/alerts.
 | Alert | Fires when | Response |
 |---|---|---|
 | `ServiceDown` | A service's metrics endpoint is unreachable for 2 minutes | Check `docker compose ps` and the service logs |
-| `HighHttpErrorRate` | More than 5% of requests return 5xx for 5 minutes | Check logs in Grafana/Loki by `requestId` |
+| `HighHttpErrorRate` | More than 5% of requests return 5xx for 5 minutes (with at least 5 requests in the window) | Check logs in Grafana/Loki by `requestId` |
 | `HighHttpLatency` | p95 latency is above 1 second for 10 minutes | Check dependency health and traces in Tempo |
 | `RefundsNeedAttention` | A refund exhausted its 10 automatic retries | Admin → Payments: read the error, then retry or resolve it in Stripe |
 | `StripeWebhookProcessingFailed` | A Stripe webhook event failed processing for 15 minutes | Fix the cause from the backend logs; Stripe retries for 3 days, after that resend the event from the Stripe dashboard |
@@ -75,4 +75,4 @@ docker compose --env-file "$ENV_FILE" -f docker-compose.prod.yml exec alertmanag
   --annotation='summary="Test alert"' --alertmanager.url=http://localhost:9093
 ```
 
-Rule changes are unit-tested in [ops/observability/alerts.test.yml](../ops/observability/alerts.test.yml) (`promtool test rules`), which CI runs.
+Every rule is unit-tested in [ops/observability/alerts.test.yml](../ops/observability/alerts.test.yml) (`promtool test rules`), and [ops/observability/test-alertmanager.sh](../ops/observability/test-alertmanager.sh) starts the real Alertmanager service to check its rendered recipients and secret; CI runs both.
