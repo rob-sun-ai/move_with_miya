@@ -1,11 +1,13 @@
 const PLACEHOLDERS = [
   'change-me',
+  'dev-secret-change-in-production',
   'guest',
   'localhost',
   'example.com',
   'example.org',
 ];
 
+/** Fails production boots on missing or placeholder configuration. */
 export function assertProductionConfig(keys: string[]): void {
   if (process.env.NODE_ENV !== 'production') return;
   const missing = keys.filter((key) => !process.env[key]);

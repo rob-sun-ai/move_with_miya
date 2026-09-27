@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import type { NextFunction, Request, Response } from 'express';
 import {
   Counter,
   Histogram,
@@ -33,4 +35,46 @@ export function recordHttpRequest(
   };
   requests.inc(labels);
   durations.observe(labels, durationMs / 1000);
+}
+
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+
+/**
+ * Propagates (or assigns) an X-Request-ID, records request metrics, and writes
+ * one structured JSON log line per request.
+ */
+export function requestTelemetry(defaultService: string) {
+  const service = process.env.OTEL_SERVICE_NAME ?? defaultService;
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const started = Date.now();
+    const incomingRequestId = req.header('x-request-id');
+    const requestId =
+      incomingRequestId && REQUEST_ID_PATTERN.test(incomingRequestId)
+        ? incomingRequestId
+        : randomUUID();
+    res.setHeader('X-Request-ID', requestId);
+    res.on('finish', () => {
+      const durationMs = Date.now() - started;
+      const route = (req as { route?: { path?: unknown } }).route;
+      recordHttpRequest(
+        req.method,
+        typeof route?.path === 'string' ? route.path : 'unmatched',
+        res.statusCode,
+        durationMs,
+      );
+      console.log(
+        JSON.stringify({
+          event: 'http_request',
+          service,
+          requestId,
+          traceparent: req.header('traceparent') ?? null,
+          method: req.method,
+          route: req.path.replace(/\d+/g, ':id'),
+          statusCode: res.statusCode,
+          durationMs,
+        }),
+      );
+    });
+    next();
+  };
 }

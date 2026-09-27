@@ -13,10 +13,8 @@ import { RedisService } from './redis.service';
 import type { RedisClient } from './redis.service';
 import { createExpressServer } from './express-server';
 import express from 'express';
-import type { NextFunction, Request, Response } from 'express';
-import { recordHttpRequest } from './metrics';
+import { requestTelemetry } from './metrics';
 import { assertProductionConfig } from './config-validation';
-import { randomUUID } from 'node:crypto';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { RedisStore } = require('connect-redis') as {
@@ -54,36 +52,6 @@ async function bootstrap() {
     'REDIS_URL',
     'RABBITMQ_URL',
   ]);
-  if (
-    nodeEnv === 'production' &&
-    (!sessionSecret ||
-      sessionSecret.length < 32 ||
-      [
-        'change-me-to-a-random-string',
-        'dev-secret-change-in-production',
-      ].includes(sessionSecret))
-  ) {
-    throw new Error(
-      'SESSION_SECRET must be a strong, non-placeholder value in production',
-    );
-  }
-  if (nodeEnv === 'production') {
-    let parsedOrigin: URL | undefined;
-    try {
-      parsedOrigin = corsOrigin ? new URL(corsOrigin) : undefined;
-    } catch {
-      parsedOrigin = undefined;
-    }
-    if (
-      !parsedOrigin ||
-      parsedOrigin.protocol !== 'https:' ||
-      parsedOrigin.origin !== corsOrigin
-    ) {
-      throw new Error(
-        'CORS_ORIGIN must be a single valid origin in production',
-      );
-    }
-  }
 
   app.enableCors({
     origin: corsOrigin || 'http://localhost:5173',
@@ -129,38 +97,7 @@ async function bootstrap() {
 
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
-  app.use((req: Request, res: Response, next: NextFunction) => {
-    const started = Date.now();
-    const incomingRequestId = req.header('x-request-id');
-    const requestId =
-      incomingRequestId && /^[A-Za-z0-9._:-]{1,128}$/.test(incomingRequestId)
-        ? incomingRequestId
-        : randomUUID();
-    res.setHeader('X-Request-ID', requestId);
-    res.on('finish', () => {
-      const durationMs = Date.now() - started;
-      const route = (req as unknown as { route?: { path?: unknown } }).route;
-      recordHttpRequest(
-        req.method,
-        typeof route?.path === 'string' ? route.path : 'unmatched',
-        res.statusCode,
-        durationMs,
-      );
-      console.log(
-        JSON.stringify({
-          event: 'http_request',
-          service: process.env.OTEL_SERVICE_NAME ?? 'backend',
-          requestId,
-          traceparent: req.header('traceparent') ?? null,
-          method: req.method,
-          route: req.path.replace(/\d+/g, ':id'),
-          statusCode: res.statusCode,
-          durationMs,
-        }),
-      );
-    });
-    next();
-  });
+  app.use(requestTelemetry('backend'));
 
   const port = configService.get<number>('PORT', 3002);
   await app.startAllMicroservices();
