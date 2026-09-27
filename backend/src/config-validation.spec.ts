@@ -25,6 +25,51 @@ describe('assertProductionConfig', () => {
     ).not.toThrow();
   });
 
+  it('only validates the keys it is given', () => {
+    expect(() =>
+      assertProductionConfig(
+        new ConfigService({
+          NODE_ENV: 'production',
+          REDIS_URL: 'redis://redis:6379',
+          SESSION_SECRET: 'short',
+          CORS_ORIGIN: 'http://insecure.test',
+        }),
+        ['REDIS_URL'],
+      ),
+    ).not.toThrow();
+  });
+
+  it('lists every missing key', () => {
+    expect(() =>
+      assertProductionConfig(new ConfigService({ NODE_ENV: 'production' }), [
+        'SESSION_SECRET',
+        'CORS_ORIGIN',
+      ]),
+    ).toThrow('Missing production configuration: SESSION_SECRET, CORS_ORIGIN');
+  });
+
+  it.each([
+    'change-me-now',
+    'DEV-SECRET-CHANGE-IN-PRODUCTION-0000000000000',
+    'guest-account',
+    'redis://localhost:6379',
+    'https://example.com',
+    'https://example.org',
+  ])('rejects placeholder %p regardless of case', (value) => {
+    expect(() =>
+      assertProductionConfig(
+        new ConfigService({ NODE_ENV: 'production', REDIS_URL: value }),
+        ['REDIS_URL'],
+      ),
+    ).toThrow('REDIS_URL contains a placeholder value');
+  });
+
+  it('rejects a CORS origin with a trailing slash', () => {
+    expect(check({ CORS_ORIGIN: 'https://studio.test/' })).toThrow(
+      'single HTTPS origin',
+    );
+  });
+
   it.each([
     [{ SESSION_SECRET: undefined }, 'Missing production configuration'],
     [{ SESSION_SECRET: 'short' }, 'at least 32 characters'],

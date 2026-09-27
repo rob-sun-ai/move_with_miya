@@ -16,36 +16,40 @@ export function assertProductionConfig(
   keys: string[],
 ): void {
   if (config.get<string>('NODE_ENV') !== 'production') return;
-  const missing = keys.filter((key) => !config.get<string>(key));
+  const values = new Map<string, string>();
+  const missing: string[] = [];
+  for (const key of keys) {
+    const value = config.get<string>(key);
+    if (value) values.set(key, value);
+    else missing.push(key);
+  }
   if (missing.length)
     throw new Error(`Missing production configuration: ${missing.join(', ')}`);
-  for (const key of keys) {
-    const value = config.get<string>(key)?.toLowerCase() ?? '';
-    if (PLACEHOLDERS.some((placeholder) => value.includes(placeholder))) {
+  for (const [key, value] of values) {
+    const normalized = value.toLowerCase();
+    if (PLACEHOLDERS.some((placeholder) => normalized.includes(placeholder))) {
       throw new Error(`${key} contains a placeholder value`);
     }
   }
-  const value = (key: string) => config.get<string>(key) ?? '';
+
+  const sessionSecret = values.get('SESSION_SECRET');
   if (
-    keys.includes('SESSION_SECRET') &&
-    value('SESSION_SECRET').length < MIN_SESSION_SECRET_LENGTH
+    sessionSecret !== undefined &&
+    sessionSecret.length < MIN_SESSION_SECRET_LENGTH
   ) {
     throw new Error(
       `SESSION_SECRET must be at least ${MIN_SESSION_SECRET_LENGTH} characters in production`,
     );
   }
-  if (keys.includes('CORS_ORIGIN')) {
-    const origin = parseHttpsUrl(value('CORS_ORIGIN'));
-    if (origin?.origin !== value('CORS_ORIGIN')) {
-      throw new Error(
-        'CORS_ORIGIN must be a single HTTPS origin in production',
-      );
-    }
-  }
+  const corsOrigin = values.get('CORS_ORIGIN');
   if (
-    keys.includes('PUBLIC_APP_URL') &&
-    !parseHttpsUrl(value('PUBLIC_APP_URL'))
+    corsOrigin !== undefined &&
+    parseHttpsUrl(corsOrigin)?.origin !== corsOrigin
   ) {
+    throw new Error('CORS_ORIGIN must be a single HTTPS origin in production');
+  }
+  const publicAppUrl = values.get('PUBLIC_APP_URL');
+  if (publicAppUrl !== undefined && !parseHttpsUrl(publicAppUrl)) {
     throw new Error('PUBLIC_APP_URL must be a valid HTTPS URL in production');
   }
 }

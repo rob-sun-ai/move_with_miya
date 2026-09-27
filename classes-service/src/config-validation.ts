@@ -14,7 +14,8 @@ export function assertProductionConfig(keys: string[]): void {
   if (missing.length)
     throw new Error(`Missing production configuration: ${missing.join(', ')}`);
   for (const key of keys) {
-    const value = process.env[key]?.toLowerCase() ?? '';
+    // Every key is set: missing ones were rejected above.
+    const value = (process.env[key] as string).toLowerCase();
     if (PLACEHOLDERS.some((placeholder) => value.includes(placeholder))) {
       throw new Error(`${key} contains a placeholder value`);
     }
