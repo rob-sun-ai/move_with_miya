@@ -788,6 +788,14 @@ export default function AdminDashboard({
                         {payment.currency.toUpperCase()})
                       </>
                     )}
+                    {payment.refundNeedsAttention && (
+                      <Chip
+                        label={`Needs attention (${payment.refundAttempts ?? 0} attempts)`}
+                        color="warning"
+                        size="small"
+                        sx={{ ml: 1 }}
+                      />
+                    )}
                     {payment.refundError && (
                       <Typography
                         variant="caption"

@@ -142,6 +142,32 @@ describe('AdminDashboard', () => {
     );
   });
 
+  it('flags refunds whose automatic retries are exhausted', async () => {
+    const user = userEvent.setup();
+    renderDashboard({
+      initialPayments: [
+        {
+          id: 'payment-5678',
+          userId: 'member-1',
+          classId: yogaClass.id,
+          amountCents: 2500,
+          currency: 'usd',
+          status: 'Paid',
+          refundStatus: 'Failed',
+          refundAttempts: 10,
+          refundNeedsAttention: true,
+          refundError: 'card_declined',
+        },
+      ],
+    });
+    await user.click(screen.getByRole('tab', { name: 'Payments' }));
+
+    expect(
+      screen.getByText('Needs attention (10 attempts)'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refund' })).toBeInTheDocument();
+  });
+
   it('marks contact submissions read and reports the result', async () => {
     const user = userEvent.setup();
     const fetchMock = vi

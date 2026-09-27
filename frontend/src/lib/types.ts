@@ -121,4 +121,7 @@ export interface Payment {
   paidAt?: string | null;
   refundedAt?: string | null;
   refundError?: string | null;
+  refundAttempts?: number;
+  /** Automatic retries are exhausted; an admin has to retry or resolve it. */
+  refundNeedsAttention?: boolean;
 }
