@@ -49,6 +49,10 @@ enum RefundStatus {
   NotEligible
 }
 
+// The stripe_payments migration also creates the partial unique index
+// "Payment_active_user_class_key" on (userId, classId) WHERE status IN
+// ('Pending', 'Paid'). Prisma cannot model it, so keep it if a future
+// `prisma migrate dev` proposes dropping it.
 model Payment {
   id                       String       @id @default(uuid())
   userId                   String

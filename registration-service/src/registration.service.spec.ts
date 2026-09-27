@@ -417,6 +417,39 @@ describe('RegistrationService', () => {
     );
   });
 
+  it('keeps an existing partial refund when a paid webhook is replayed after class cancellation', async () => {
+    const payment = {
+      id: 'payment-1',
+      userId: 'user-1',
+      classId: 10,
+      amountCents: 2500,
+      currency: 'usd',
+      status: 'Paid',
+      refundStatus: 'Pending',
+      refundPercentage: 50,
+      refundAmountCents: 1250,
+      stripeCheckoutSessionId: 'cs_1',
+      stripePaymentIntentId: 'pi_1',
+      registrationId: 1,
+      paidAt: new Date(),
+    };
+    prisma.payment.findUnique.mockResolvedValue(payment);
+
+    await expect(
+      service.finalizePaidRegistration({
+        paymentId: 'payment-1',
+        checkoutSessionId: 'cs_1',
+        paymentIntentId: 'pi_1',
+        amountCents: 2500,
+        currency: 'usd',
+        capacity: 10,
+        classStatus: 'Canceled',
+        classEndAt: '2099-01-01T11:00:00.000Z',
+      }),
+    ).resolves.toEqual({ payment, registration: null, needsRefund: true });
+    expect(prisma.payment.update).not.toHaveBeenCalled();
+  });
+
   it('requires the exact expected amount before completing a refund', async () => {
     prisma.payment.findUnique.mockResolvedValue({
       id: 'payment-1',
