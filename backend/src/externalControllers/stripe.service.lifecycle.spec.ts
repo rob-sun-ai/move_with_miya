@@ -74,17 +74,28 @@ function setup(env: Record<string, string | undefined> = {}) {
     ),
   };
   const classes = { send: jest.fn().mockReturnValue(of(openClass)) };
+  const redisCommand = jest.fn().mockResolvedValue('OK');
 
   const service = new StripeService(
     config as never,
     registrations as never,
     classes as never,
+    { getClient: () => ({ sendCommand: redisCommand }) } as never,
   );
   const sent = (cmd: string) =>
     registrations.send.mock.calls
       .filter(([pattern]) => pattern.cmd === cmd)
       .map(([, payload]) => payload);
-  return { service, stripe, config, replies, registrations, classes, sent };
+  return {
+    service,
+    stripe,
+    config,
+    replies,
+    registrations,
+    classes,
+    redisCommand,
+    sent,
+  };
 }
 
 /** Makes an RPC reply fail with the given error payload. */
@@ -1787,6 +1798,41 @@ describe('StripeService lifecycle', () => {
       await ctx.service.retryRefunds();
 
       expect(refund.mock.calls).toEqual([['payment-1'], ['payment-2']]);
+    });
+
+    it('takes a lock that expires before the next sweep', async () => {
+      const ctx = setup();
+      ctx.replies.list_refund_pending_payments = [];
+
+      await ctx.service.retryRefunds();
+
+      expect(ctx.redisCommand).toHaveBeenCalledWith([
+        'SET',
+        'stripe:refund-sweep-lock',
+        String(process.pid),
+        'NX',
+        'PX',
+        '55000',
+      ]);
+    });
+
+    it('logs a sweep that cannot take the lock and runs again next time', async () => {
+      const ctx = setup();
+      const warn = jest
+        .spyOn(
+          (ctx.service as unknown as { logger: { warn: jest.Mock } }).logger,
+          'warn',
+        )
+        .mockImplementation(() => undefined);
+      ctx.redisCommand.mockRejectedValueOnce(new Error('Redis down'));
+      ctx.replies.list_refund_pending_payments = [];
+
+      await ctx.service.retryRefunds();
+      expect(warn).toHaveBeenCalledWith('Refund retry sweep failed');
+      expect(ctx.sent('list_refund_pending_payments')).toEqual([]);
+
+      await ctx.service.retryRefunds();
+      expect(ctx.sent('list_refund_pending_payments')).toEqual([{}]);
     });
 
     it('logs a sweep that cannot list refunds', async () => {
