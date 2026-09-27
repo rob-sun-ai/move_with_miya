@@ -1,7 +1,9 @@
+# shellcheck shell=sh
 # Shared helpers for the production operations scripts.
 # Source from the repository root: `. ./ops/lib.sh`.
 
 # Databases created by postgres/init.sql, one per service.
+# shellcheck disable=SC2034 # used by the scripts that source this file
 APP_DATABASES='miya_users miya_classes miya_registrations'
 
 load_env() {

@@ -134,3 +134,5 @@ compose up -d user-service backend classes-service registration-service
 ```
 
 Files that are not in `BACKUP_DIR` are fetched from `RESTORE_REMOTE`, a remote using the read key (the server's own key can only upload). Checksums are verified before anything is restored. Remove the read key and the private age key from the server afterwards.
+
+The backup and restore scripts are tested by `ops/tests/run.sh` (real age and rclone, with a Docker test double), which CI runs together with shellcheck.

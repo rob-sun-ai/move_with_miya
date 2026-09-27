@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Test double for `docker compose ... exec -T <service> <command...>` as used
+# by the ops scripts. Records every call in $SHIM_DIR/docker.log.
+#   postgres pg_dump    -> prints "DUMP:<database>" (fails if SHIM_FAIL_DUMP=<database>)
+#   postgres pg_restore -> saves stdin to $SHIM_DIR/restored_<database>
+#   alertmanager        -> appends the call to $SHIM_DIR/alerts.log (fails if SHIM_FAIL_ALERT=1)
+set -euo pipefail
+printf '%s\n' "$*" >> "$SHIM_DIR/docker.log"
+
+args=("$@")
+for index in "${!args[@]}"; do
+  if [ "${args[$index]}" = exec ]; then
+    service=${args[$((index + 2))]}
+    command=${args[*]:$((index + 3))}
+    break
+  fi
+done
+[ -n "${service:-}" ] || exit 0
+
+database=$(printf '%s' "${command:-}" | sed -n "s/.*-d '\([a-z_]*\)'.*/\1/p")
+case "$service" in
+  postgres)
+    case "$command" in
+      *pg_dump*)
+        [ "${SHIM_FAIL_DUMP:-}" != "$database" ] || exit 1
+        printf 'DUMP:%s' "$database"
+        ;;
+      *pg_restore*) cat > "$SHIM_DIR/restored_$database" ;;
+    esac
+    ;;
+  alertmanager)
+    printf '%s\n' "$command" >> "$SHIM_DIR/alerts.log"
+    [ -z "${SHIM_FAIL_ALERT:-}" ] || exit 1
+    ;;
+esac
