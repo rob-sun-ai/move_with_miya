@@ -26,6 +26,12 @@ describe('RegistrationService', () => {
       findMany: jest.Mock;
       update: jest.Mock;
     };
+    payment: {
+      findUnique: jest.Mock;
+      findFirst: jest.Mock;
+      findMany: jest.Mock;
+      update: jest.Mock;
+    };
     $transaction: jest.Mock;
     outboxEvent: {
       create: jest.Mock;
@@ -58,6 +64,12 @@ describe('RegistrationService', () => {
       },
       contactSubmission: {
         create: jest.fn(),
+        findMany: jest.fn(),
+        update: jest.fn(),
+      },
+      payment: {
+        findUnique: jest.fn(),
+        findFirst: jest.fn(),
         findMany: jest.fn(),
         update: jest.fn(),
       },
@@ -322,6 +334,106 @@ describe('RegistrationService', () => {
     await expect(
       service.findRegistrationByClassAndUser(10, 'user-1'),
     ).resolves.toEqual(existing);
+  });
+
+  it('returns only safe payment status fields to the owning user', async () => {
+    prisma.payment.findUnique.mockResolvedValue({
+      id: 'payment-1',
+      userId: 'user-1',
+      classId: 10,
+      amountCents: 2500,
+      currency: 'usd',
+      status: 'Paid',
+      refundStatus: 'None',
+      stripeCheckoutSessionId: 'cs_secret',
+      stripePaymentIntentId: 'pi_secret',
+      registrationId: 1,
+    });
+    prisma.registration.findUnique.mockResolvedValue({
+      id: 1,
+      status: 'Registered',
+      userId: 'user-1',
+    });
+
+    await expect(
+      service.getPaymentStatusForUser('cs_secret', 'user-1'),
+    ).resolves.toEqual({
+      payment: {
+        id: 'payment-1',
+        classId: 10,
+        amountCents: 2500,
+        currency: 'usd',
+        status: 'Paid',
+        refundStatus: 'None',
+        refundPercentage: undefined,
+        refundAmountCents: undefined,
+      },
+      registration: { id: 1, status: 'Registered' },
+    });
+  });
+
+  it('does not create a registration for a paid webhook after class cancellation', async () => {
+    const payment = {
+      id: 'payment-1',
+      userId: 'user-1',
+      classId: 10,
+      amountCents: 2500,
+      currency: 'usd',
+      status: 'Pending',
+      refundStatus: 'None',
+      stripeCheckoutSessionId: 'cs_1',
+      stripePaymentIntentId: null,
+      registrationId: null,
+      paidAt: null,
+    };
+    prisma.payment.findUnique.mockResolvedValue(payment);
+    prisma.payment.update.mockImplementation(({ data }: { data: object }) => ({
+      ...payment,
+      ...data,
+      status: 'Paid',
+      refundStatus: 'Pending',
+    }));
+
+    await expect(
+      service.finalizePaidRegistration({
+        paymentId: 'payment-1',
+        checkoutSessionId: 'cs_1',
+        paymentIntentId: 'pi_1',
+        amountCents: 2500,
+        currency: 'usd',
+        capacity: 10,
+        classStatus: 'Canceled',
+        classEndAt: '2099-01-01T11:00:00.000Z',
+      }),
+    ).resolves.toMatchObject({ needsRefund: true });
+    expect(prisma.registration.create).not.toHaveBeenCalled();
+    expect(prisma.payment.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          refundPercentage: 100,
+          refundAmountCents: 2500,
+        }) as never,
+      }) as never,
+    );
+  });
+
+  it('requires the exact expected amount before completing a refund', async () => {
+    prisma.payment.findUnique.mockResolvedValue({
+      id: 'payment-1',
+      refundAmountCents: 500,
+      stripeRefundId: null,
+    });
+
+    await expect(
+      service.completePaymentRefund({
+        paymentId: 'payment-1',
+        stripeRefundId: 're_1',
+        amountCents: 400,
+      }),
+    ).rejects.toMatchObject({
+      message: 'Stripe refund amount does not match payment',
+    });
+    expect(prisma.payment.update).not.toHaveBeenCalled();
   });
 
   it('throws 404 when not registered for class/user', async () => {

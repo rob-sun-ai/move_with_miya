@@ -82,6 +82,17 @@ const NOTIFICATION_LEASE_MS = 5 * 60 * 1_000;
 
 const MAX_CONTACT_PAGE_SIZE = 100;
 
+const ACTIVE_PAYMENT_STATUSES = ['Pending', 'Paid'] as const;
+
+function assertPaymentInput(amountCents: number, currency: string) {
+  if (!Number.isSafeInteger(amountCents) || amountCents <= 0) {
+    throw new RpcError(400, 'Payment amount is invalid');
+  }
+  if (!/^[a-z]{3}$/.test(currency)) {
+    throw new RpcError(400, 'Payment currency is invalid');
+  }
+}
+
 @Injectable()
 export class RegistrationService {
   constructor(private readonly prisma: PrismaService) {}
@@ -156,6 +167,529 @@ export class RegistrationService {
     });
     if (!reg) throw new RpcError(404, `Registration ${id} not found`);
     return reg;
+  }
+
+  async getClassPaymentAvailability(classId: number, capacity: number) {
+    if (!Number.isInteger(capacity) || capacity <= 0) {
+      throw new RpcError(400, 'Class capacity is invalid');
+    }
+    const now = new Date();
+    const [registered, pending] = await Promise.all([
+      this.prisma.client.registration.count({
+        where: { classId, status: 'Registered' },
+      }),
+      this.prisma.client.payment.count({
+        where: { classId, status: 'Pending', expiresAt: { gt: now } },
+      }),
+    ]);
+    return {
+      classId,
+      capacity,
+      registered,
+      pending,
+      available: Math.max(0, capacity - registered - pending),
+    };
+  }
+
+  async createOrGetPendingPayment(data: {
+    userId: string;
+    classId: number;
+    capacity: number;
+    amountCents: number;
+    currency: string;
+    expiresAt: string | Date;
+  }) {
+    assertPaymentInput(data.amountCents, data.currency);
+    if (!data.userId || !Number.isInteger(data.classId) || data.classId <= 0) {
+      throw new RpcError(400, 'Payment owner or class is invalid');
+    }
+    const expiresAt = new Date(data.expiresAt);
+    if (Number.isNaN(expiresAt.getTime()) || expiresAt <= new Date()) {
+      throw new RpcError(400, 'Payment expiration is invalid');
+    }
+
+    return this.runSerializable(async (tx) => {
+      const existingRegistration = await tx.registration.findFirst({
+        where: { classId: data.classId, userId: data.userId },
+      });
+      if (existingRegistration?.status === 'Registered') {
+        throw new RpcError(409, 'Already registered for this class');
+      }
+      const existing = await tx.payment.findFirst({
+        where: {
+          userId: data.userId,
+          classId: data.classId,
+          status: { in: [...ACTIVE_PAYMENT_STATUSES] },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (existing?.status === 'Paid') return existing;
+      if (
+        existing?.status === 'Pending' &&
+        existing.expiresAt > new Date() &&
+        existing.amountCents === data.amountCents &&
+        existing.currency === data.currency
+      ) {
+        return existing;
+      }
+      if (existing) {
+        await tx.payment.update({
+          where: { id: existing.id },
+          data: { status: 'Expired' },
+        });
+      }
+
+      const [registered, pending] = await Promise.all([
+        tx.registration.count({
+          where: { classId: data.classId, status: 'Registered' },
+        }),
+        tx.payment.count({
+          where: {
+            classId: data.classId,
+            status: 'Pending',
+            expiresAt: { gt: new Date() },
+          },
+        }),
+      ]);
+      if (registered + pending >= data.capacity) {
+        throw new RpcError(409, 'Class is full');
+      }
+      return tx.payment.create({
+        data: {
+          userId: data.userId,
+          classId: data.classId,
+          amountCents: data.amountCents,
+          currency: data.currency,
+          expiresAt,
+        },
+      });
+    });
+  }
+
+  async attachCheckoutSession(data: {
+    paymentId: string;
+    stripeCheckoutSessionId: string;
+  }) {
+    if (!data.paymentId || !data.stripeCheckoutSessionId) {
+      throw new RpcError(400, 'Payment and Checkout session are required');
+    }
+    const payment = await this.prisma.client.payment.findUnique({
+      where: { id: data.paymentId },
+    });
+    if (!payment) throw new RpcError(404, 'Payment not found');
+    if (
+      payment.stripeCheckoutSessionId &&
+      payment.stripeCheckoutSessionId !== data.stripeCheckoutSessionId
+    ) {
+      throw new RpcError(409, 'Payment already has a Checkout session');
+    }
+    return this.prisma.client.payment.update({
+      where: { id: data.paymentId },
+      data: { stripeCheckoutSessionId: data.stripeCheckoutSessionId },
+    });
+  }
+
+  getPaymentById(id: string) {
+    return this.prisma.client.payment.findUnique({ where: { id } });
+  }
+
+  getPaymentByCheckoutSession(stripeCheckoutSessionId: string) {
+    return this.prisma.client.payment.findUnique({
+      where: { stripeCheckoutSessionId },
+    });
+  }
+
+  getPaymentByPaymentIntent(paymentIntentId: string) {
+    return this.prisma.client.payment.findUnique({
+      where: { stripePaymentIntentId: paymentIntentId },
+    });
+  }
+
+  async getPaymentStatusForUser(
+    stripeCheckoutSessionId: string,
+    userId: string,
+  ) {
+    const payment = await this.prisma.client.payment.findUnique({
+      where: { stripeCheckoutSessionId },
+    });
+    if (!payment || payment.userId !== userId) {
+      throw new RpcError(404, 'Payment not found');
+    }
+    const registration = payment.registrationId
+      ? await this.prisma.client.registration.findUnique({
+          where: { id: payment.registrationId },
+        })
+      : null;
+    return {
+      payment: {
+        id: payment.id,
+        classId: payment.classId,
+        amountCents: payment.amountCents,
+        currency: payment.currency,
+        status: payment.status,
+        refundStatus: payment.refundStatus,
+        refundPercentage: payment.refundPercentage,
+        refundAmountCents: payment.refundAmountCents,
+      },
+      registration: registration
+        ? { id: registration.id, status: registration.status }
+        : null,
+    };
+  }
+
+  async finalizePaidRegistration(data: {
+    paymentId: string;
+    checkoutSessionId: string;
+    paymentIntentId?: string | null;
+    amountCents: number;
+    currency: string;
+    capacity: number;
+    classStatus: string;
+    classEndAt: string;
+  }) {
+    assertPaymentInput(data.amountCents, data.currency);
+    if (!Number.isInteger(data.capacity) || data.capacity <= 0) {
+      throw new RpcError(400, 'Class capacity is invalid');
+    }
+    if (
+      !data.classStatus ||
+      Number.isNaN(new Date(data.classEndAt).getTime())
+    ) {
+      throw new RpcError(400, 'Class lifecycle data is invalid');
+    }
+    return this.runSerializable(async (tx) => {
+      const payment = await tx.payment.findUnique({
+        where: { id: data.paymentId },
+      });
+      if (!payment) throw new RpcError(404, 'Payment not found');
+      if (
+        payment.stripeCheckoutSessionId !== data.checkoutSessionId ||
+        payment.amountCents !== data.amountCents ||
+        payment.currency !== data.currency ||
+        (data.paymentIntentId &&
+          payment.stripePaymentIntentId &&
+          payment.stripePaymentIntentId !== data.paymentIntentId)
+      ) {
+        throw new RpcError(400, 'Stripe payment details do not match');
+      }
+
+      const classUnavailable =
+        data.classStatus === 'Canceled' ||
+        data.classStatus === 'Completed' ||
+        new Date(data.classEndAt).getTime() <= Date.now();
+      if (classUnavailable) {
+        if (
+          payment.status === 'Refunded' ||
+          payment.refundStatus === 'Succeeded'
+        ) {
+          return { payment, registration: null, needsRefund: false };
+        }
+        const refundPayment = await tx.payment.update({
+          where: { id: payment.id },
+          data: {
+            status: 'Paid',
+            stripePaymentIntentId:
+              data.paymentIntentId ?? payment.stripePaymentIntentId,
+            paidAt: payment.paidAt ?? new Date(),
+            refundStatus: 'Pending',
+            refundPercentage: 100,
+            refundAmountCents: payment.amountCents,
+            refundRequestedAt: new Date(),
+          },
+        });
+        return {
+          payment: refundPayment,
+          registration: null,
+          needsRefund: true,
+        };
+      }
+
+      if (payment.status === 'Paid' && payment.registrationId) {
+        const registration = await tx.registration.findUnique({
+          where: { id: payment.registrationId },
+        });
+        return { payment, registration, needsRefund: false };
+      }
+      if (payment.status !== 'Pending') {
+        const updatedPayment =
+          payment.status === 'Expired' || payment.status === 'Failed'
+            ? await tx.payment.update({
+                where: { id: payment.id },
+                data: {
+                  status: 'Paid',
+                  stripePaymentIntentId:
+                    data.paymentIntentId ?? payment.stripePaymentIntentId,
+                  paidAt: new Date(),
+                  refundStatus: 'Pending',
+                  refundPercentage: 100,
+                  refundAmountCents: payment.amountCents,
+                  refundRequestedAt: new Date(),
+                },
+              })
+            : data.paymentIntentId && !payment.stripePaymentIntentId
+              ? await tx.payment.update({
+                  where: { id: payment.id },
+                  data: { stripePaymentIntentId: data.paymentIntentId },
+                })
+              : payment;
+        return {
+          payment: updatedPayment,
+          registration: null,
+          needsRefund: updatedPayment.status !== 'Refunded',
+        };
+      }
+
+      const existing = await tx.registration.findFirst({
+        where: { classId: payment.classId, userId: payment.userId },
+      });
+      const registeredCount = await tx.registration.count({
+        where: { classId: payment.classId, status: 'Registered' },
+      });
+      if (
+        registeredCount >= data.capacity &&
+        existing?.status !== 'Registered'
+      ) {
+        const paidPayment = await tx.payment.update({
+          where: { id: payment.id },
+          data: {
+            status: 'Paid',
+            stripePaymentIntentId: data.paymentIntentId ?? undefined,
+            paidAt: new Date(),
+            refundStatus: 'Pending',
+            refundPercentage: 100,
+            refundAmountCents: payment.amountCents,
+            refundRequestedAt: new Date(),
+          },
+        });
+        return { payment: paidPayment, registration: null, needsRefund: true };
+      }
+
+      if (existing?.status === 'Registered') {
+        const duplicatePayment = await tx.payment.update({
+          where: { id: payment.id },
+          data: {
+            status: 'Paid',
+            stripePaymentIntentId: data.paymentIntentId ?? undefined,
+            paidAt: new Date(),
+            registrationId: existing.id,
+            refundStatus: 'Pending',
+            refundPercentage: 100,
+            refundAmountCents: payment.amountCents,
+            refundRequestedAt: new Date(),
+          },
+        });
+        return {
+          payment: duplicatePayment,
+          registration: existing,
+          needsRefund: true,
+        };
+      }
+
+      const now = new Date();
+      const registration = existing
+        ? await tx.registration.update({
+            where: { id: existing.id },
+            data: {
+              status: 'Registered',
+              registeredAt: now,
+              canceledAt: null,
+              waitlistedAt: null,
+              promotedAt: null,
+              cancellationReason: null,
+              source: 'stripe-webhook',
+            },
+          })
+        : await tx.registration.create({
+            data: {
+              classId: payment.classId,
+              userId: payment.userId,
+              status: 'Registered',
+              source: 'stripe-webhook',
+            },
+          });
+      const paidPayment = await tx.payment.update({
+        where: { id: payment.id },
+        data: {
+          status: 'Paid',
+          stripePaymentIntentId: data.paymentIntentId ?? undefined,
+          paidAt: new Date(),
+          registrationId: registration.id,
+        },
+      });
+      await this.addOutboxEvent(
+        tx,
+        registration,
+        'registration.confirmed',
+        `registration:${registration.id}:paid:${payment.id}`,
+        { paymentId: payment.id },
+      );
+      return { payment: paidPayment, registration, needsRefund: false };
+    });
+  }
+
+  markPaymentFailed(id: string, error?: string) {
+    return this.prisma.client.payment.updateMany({
+      where: { id, status: 'Pending' },
+      data: {
+        refundError: error?.slice(0, 500),
+        status: 'Failed',
+      },
+    });
+  }
+
+  markPaymentExpired(id: string) {
+    return this.prisma.client.payment.updateMany({
+      where: { id, status: 'Pending' },
+      data: { status: 'Expired' },
+    });
+  }
+
+  async beginPaymentRefund(data: { paymentId: string; percentage: number }) {
+    if (
+      !Number.isInteger(data.percentage) ||
+      data.percentage < 0 ||
+      data.percentage > 100
+    ) {
+      throw new RpcError(
+        400,
+        'Refund percentage must be an integer from 0 to 100',
+      );
+    }
+    const payment = await this.prisma.client.payment.findUnique({
+      where: { id: data.paymentId },
+    });
+    if (!payment) throw new RpcError(404, 'Payment not found');
+    if (payment.status !== 'Paid') {
+      throw new RpcError(409, 'Only paid payments can be refunded');
+    }
+    if (payment.refundStatus === 'Succeeded') return payment;
+    if (
+      payment.refundStatus === 'Pending' &&
+      payment.refundPercentage !== data.percentage
+    ) {
+      throw new RpcError(409, 'A different refund is already in progress');
+    }
+    const refundAmountCents = Math.floor(
+      (payment.amountCents * data.percentage) / 100,
+    );
+    return this.prisma.client.payment.update({
+      where: { id: payment.id },
+      data: {
+        refundPercentage: data.percentage,
+        refundAmountCents,
+        refundRequestedAt: new Date(),
+        refundStatus: refundAmountCents > 0 ? 'Pending' : 'NotEligible',
+        refundError: null,
+      },
+    });
+  }
+
+  async beginClassRefunds(classId: number) {
+    const payments = await this.prisma.client.payment.findMany({
+      where: { classId, status: 'Paid', refundStatus: 'None' },
+    });
+    const result: unknown[] = [];
+    for (const payment of payments) {
+      result.push(
+        await this.beginPaymentRefund({
+          paymentId: payment.id,
+          percentage: 100,
+        }),
+      );
+    }
+    return result;
+  }
+
+  async completePaymentRefund(data: {
+    paymentId: string;
+    stripeRefundId?: string;
+    amountCents: number;
+  }) {
+    const payment = await this.prisma.client.payment.findUnique({
+      where: { id: data.paymentId },
+    });
+    if (!payment) throw new RpcError(404, 'Payment not found');
+    if (payment.refundAmountCents !== data.amountCents) {
+      throw new RpcError(409, 'Stripe refund amount does not match payment');
+    }
+    if (
+      payment.stripeRefundId &&
+      data.stripeRefundId &&
+      payment.stripeRefundId !== data.stripeRefundId
+    ) {
+      throw new RpcError(409, 'Stripe refund does not match payment');
+    }
+    return this.prisma.client.payment.update({
+      where: { id: data.paymentId },
+      data: {
+        status: 'Refunded',
+        refundStatus: 'Succeeded',
+        stripeRefundId: data.stripeRefundId ?? payment.stripeRefundId,
+        refundedAt: new Date(),
+        refundError: null,
+      },
+    });
+  }
+
+  recordPaymentRefund(paymentId: string, stripeRefundId: string) {
+    return this.prisma.client.payment.update({
+      where: { id: paymentId },
+      data: { stripeRefundId },
+    });
+  }
+
+  failPaymentRefund(paymentId: string, error: string) {
+    return this.prisma.client.payment.update({
+      where: { id: paymentId },
+      data: { refundStatus: 'Failed', refundError: error.slice(0, 500) },
+    });
+  }
+
+  listRefundPendingPayments() {
+    return this.prisma.client.payment.findMany({
+      where: { refundStatus: { in: ['Pending', 'Failed'] } },
+      orderBy: { updatedAt: 'asc' },
+      take: 100,
+    });
+  }
+
+  getAllPayments() {
+    return this.prisma.client.payment.findMany({
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: 500,
+    });
+  }
+
+  async recordStripeWebhookEvent(data: {
+    stripeEventId: string;
+    eventType: string;
+  }) {
+    try {
+      const event = await this.prisma.client.stripeWebhookEvent.create({
+        data: data,
+      });
+      return { claimed: true, event };
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'P2002') throw error;
+      const event = await this.prisma.client.stripeWebhookEvent.findUnique({
+        where: { stripeEventId: data.stripeEventId },
+      });
+      return { claimed: event?.status === 'Processed' ? false : true, event };
+    }
+  }
+
+  completeStripeWebhookEvent(stripeEventId: string) {
+    return this.prisma.client.stripeWebhookEvent.update({
+      where: { stripeEventId },
+      data: { status: 'Processed', processedAt: new Date(), error: null },
+    });
+  }
+
+  failStripeWebhookEvent(stripeEventId: string, error: string) {
+    return this.prisma.client.stripeWebhookEvent.update({
+      where: { stripeEventId },
+      data: { status: 'Failed', error: error.slice(0, 500) },
+    });
   }
 
   async createRegistration(
@@ -267,6 +801,7 @@ export class RegistrationService {
       cancellationCutoffHours?: number;
       source?: string;
       reason?: string;
+      refundPercentage?: number;
     },
   ) {
     return this.cancelRegistration(
@@ -295,6 +830,7 @@ export class RegistrationService {
       cancellationCutoffHours?: number;
       source?: string;
       reason?: string;
+      refundPercentage?: number;
     },
   ) {
     assertRecordId(id, 'Registration');
@@ -348,6 +884,46 @@ export class RegistrationService {
           current.classId,
           options.capacity,
         );
+      }
+      if (
+        options.refundPercentage !== undefined &&
+        current.status === 'Registered'
+      ) {
+        if (
+          !Number.isInteger(options.refundPercentage) ||
+          options.refundPercentage < 0 ||
+          options.refundPercentage > 100
+        ) {
+          throw new RpcError(
+            400,
+            'Refund percentage must be an integer from 0 to 100',
+          );
+        }
+        const payment = await tx.payment.findFirst({
+          where: {
+            classId: current.classId,
+            userId: current.userId,
+            status: 'Paid',
+            refundStatus: 'None',
+          },
+          orderBy: { createdAt: 'desc' },
+        });
+        if (payment) {
+          const refundAmountCents = Math.floor(
+            (payment.amountCents * options.refundPercentage) / 100,
+          );
+          await tx.payment.update({
+            where: { id: payment.id },
+            data: {
+              refundPercentage: options.refundPercentage,
+              refundAmountCents,
+              refundRequestedAt: new Date(),
+              refundStatus: refundAmountCents > 0 ? 'Pending' : 'NotEligible',
+              refundError: null,
+            },
+          });
+          return { ...result, refundPaymentId: payment.id };
+        }
       }
       return result;
     });

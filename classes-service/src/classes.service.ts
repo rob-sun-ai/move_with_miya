@@ -10,6 +10,23 @@ import {
   rejectUnknownFields,
 } from './payload-validation';
 
+export interface RefundTier {
+  hoursBeforeStart: number;
+  percentage: number;
+}
+
+export const DEFAULT_REFUND_POLICY: RefundTier[] = [
+  { hoursBeforeStart: 24, percentage: 100 },
+];
+
+/** Plain objects, as Prisma's JSON input type requires. */
+function toJson(policy: RefundTier[]) {
+  return policy.map(({ hoursBeforeStart, percentage }) => ({
+    hoursBeforeStart,
+    percentage,
+  }));
+}
+
 /** The fields an admin may set when creating or updating a class. */
 const CLASS_FIELDS = [
   'name',
@@ -26,6 +43,7 @@ const CLASS_FIELDS = [
   'isPrivate',
   'waitlistEnabled',
   'cancellationCutoffHours',
+  'refundPolicy',
 ] as const;
 
 interface ClassFields {
@@ -43,6 +61,7 @@ interface ClassFields {
   isPrivate?: boolean;
   waitlistEnabled?: boolean;
   cancellationCutoffHours?: number;
+  refundPolicy?: RefundTier[];
 }
 
 @Injectable()
@@ -82,6 +101,68 @@ export class ClassesService {
     }
     // The pattern above only admits finite, non-negative values.
     return Number(raw);
+  }
+
+  private parseRefundPolicy(value: unknown): RefundTier[] {
+    if (!Array.isArray(value) || value.length === 0) {
+      throw new BadRequestException('refundPolicy must be a non-empty array');
+    }
+
+    const tiers = value.map((tier, index) => {
+      if (!tier || typeof tier !== 'object') {
+        throw new BadRequestException(`refundPolicy[${index}] is invalid`);
+      }
+      const candidate = tier as Record<string, unknown>;
+      const keys = Object.keys(candidate).sort();
+      if (
+        keys.length !== 2 ||
+        keys[0] !== 'hoursBeforeStart' ||
+        keys[1] !== 'percentage'
+      ) {
+        throw new BadRequestException(
+          `refundPolicy[${index}] must contain only hoursBeforeStart and percentage`,
+        );
+      }
+      const hoursBeforeStart = candidate.hoursBeforeStart;
+      const percentage = candidate.percentage;
+      if (
+        typeof hoursBeforeStart !== 'number' ||
+        !Number.isSafeInteger(hoursBeforeStart) ||
+        hoursBeforeStart < 0
+      ) {
+        throw new BadRequestException(
+          `refundPolicy[${index}].hoursBeforeStart must be a non-negative integer`,
+        );
+      }
+      if (
+        typeof percentage !== 'number' ||
+        !Number.isSafeInteger(percentage) ||
+        percentage < 0 ||
+        percentage > 100
+      ) {
+        throw new BadRequestException(
+          `refundPolicy[${index}].percentage must be an integer from 0 to 100`,
+        );
+      }
+      return { hoursBeforeStart, percentage };
+    });
+
+    const thresholds = new Set(tiers.map((tier) => tier.hoursBeforeStart));
+    if (thresholds.size !== tiers.length) {
+      throw new BadRequestException('refundPolicy thresholds must be unique');
+    }
+    return tiers.sort((a, b) => b.hoursBeforeStart - a.hoursBeforeStart);
+  }
+
+  private validateRefundPolicyCutoff(
+    policy: RefundTier[],
+    cutoffHours: number,
+  ): void {
+    if (!policy.some((tier) => tier.hoursBeforeStart <= cutoffHours)) {
+      throw new BadRequestException(
+        'refundPolicy must include a tier applicable at the cancellation cutoff',
+      );
+    }
   }
 
   private parseTeacherIds(value: unknown): string[] {
@@ -167,6 +248,9 @@ export class ClassesService {
         0,
       );
     }
+    if (data.refundPolicy !== undefined) {
+      fields.refundPolicy = this.parseRefundPolicy(data.refundPolicy);
+    }
     return fields;
   }
 
@@ -189,6 +273,9 @@ export class ClassesService {
     if (endDate <= startDate) {
       throw new BadRequestException('endDate must be after startDate');
     }
+    const cancellationCutoffHours = fields.cancellationCutoffHours ?? 24;
+    const refundPolicy = fields.refundPolicy ?? DEFAULT_REFUND_POLICY;
+    this.validateRefundPolicyCutoff(refundPolicy, cancellationCutoffHours);
 
     return this.prisma.client.yogaClass.create({
       data: {
@@ -205,7 +292,8 @@ export class ClassesService {
         status: fields.status ?? ClassStatus.Scheduled,
         isPrivate: fields.isPrivate ?? false,
         waitlistEnabled: fields.waitlistEnabled ?? true,
-        cancellationCutoffHours: fields.cancellationCutoffHours ?? 24,
+        cancellationCutoffHours,
+        refundPolicy: toJson(refundPolicy),
       },
       include: { location: true },
     });
@@ -214,12 +302,22 @@ export class ClassesService {
   updateClass(id: unknown, data: Record<string, unknown>) {
     const classId = parseId(id);
     const updateData = this.parseClassFields(data);
-    const hasScheduleUpdate =
-      updateData.startDate !== undefined || updateData.endDate !== undefined;
-    if (!hasScheduleUpdate) {
+    const { refundPolicy, ...scalarData } = updateData;
+    const writeData: Omit<ClassFields, 'refundPolicy'> & {
+      refundPolicy?: ReturnType<typeof toJson>;
+    } = {
+      ...scalarData,
+      ...(refundPolicy && { refundPolicy: toJson(refundPolicy) }),
+    };
+    const needsPersistedValidation =
+      updateData.startDate !== undefined ||
+      updateData.endDate !== undefined ||
+      refundPolicy !== undefined ||
+      updateData.cancellationCutoffHours !== undefined;
+    if (!needsPersistedValidation) {
       return this.prisma.client.yogaClass.update({
         where: { id: classId },
-        data: updateData,
+        data: writeData,
         include: { location: true },
       });
     }
@@ -228,7 +326,12 @@ export class ClassesService {
       async (tx) => {
         const persistedClass = await tx.yogaClass.findUniqueOrThrow({
           where: { id: classId },
-          select: { startDate: true, endDate: true },
+          select: {
+            startDate: true,
+            endDate: true,
+            cancellationCutoffHours: true,
+            refundPolicy: true,
+          },
         });
         const startDate = updateData.startDate ?? persistedClass.startDate;
         const endDate = updateData.endDate ?? persistedClass.endDate;
@@ -237,9 +340,17 @@ export class ClassesService {
           throw new BadRequestException('endDate must be after startDate');
         }
 
+        const cutoffHours = updateData.cancellationCutoffHours;
+        if (refundPolicy !== undefined || cutoffHours !== undefined) {
+          this.validateRefundPolicyCutoff(
+            refundPolicy ?? this.parseRefundPolicy(persistedClass.refundPolicy),
+            cutoffHours ?? persistedClass.cancellationCutoffHours,
+          );
+        }
+
         return tx.yogaClass.update({
           where: { id: classId },
-          data: updateData,
+          data: writeData,
           include: { location: true },
         });
       },

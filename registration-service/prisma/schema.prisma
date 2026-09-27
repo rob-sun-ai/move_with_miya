@@ -33,6 +33,62 @@ model Registration {
   @@index([userId, status])
 }
 
+enum PaymentStatus {
+  Pending
+  Paid
+  Failed
+  Expired
+  Refunded
+}
+
+enum RefundStatus {
+  None
+  Pending
+  Succeeded
+  Failed
+  NotEligible
+}
+
+model Payment {
+  id                       String       @id @default(uuid())
+  userId                   String
+  classId                  Int
+  stripeCheckoutSessionId  String?      @unique
+  stripePaymentIntentId    String?      @unique
+  stripeRefundId           String?      @unique
+  amountCents              Int
+  currency                 String
+  status                   PaymentStatus @default(Pending)
+  refundStatus             RefundStatus  @default(None)
+  registrationId           Int?
+  refundPercentage         Int?
+  refundAmountCents        Int?
+  refundRequestedAt        DateTime?
+  refundedAt               DateTime?
+  refundError              String?
+  expiresAt                DateTime
+  paidAt                   DateTime?
+  createdAt                DateTime       @default(now())
+  updatedAt                DateTime       @updatedAt
+
+  @@index([userId, classId, status])
+  @@index([classId, status])
+  @@index([status, expiresAt])
+  @@index([refundStatus, updatedAt])
+}
+
+model StripeWebhookEvent {
+  id          String    @id @default(uuid())
+  stripeEventId String  @unique
+  eventType   String
+  status      String    @default("Pending")
+  error       String?
+  processedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([status, createdAt])
+}
+
 model OutboxEvent {
   id          String    @id @default(uuid())
   eventKey    String    @unique

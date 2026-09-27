@@ -126,6 +126,38 @@ describe('ClassesService date validation', () => {
         service.createClass({ ...base, cancellationCutoffHours: -1 }),
       ).toThrow(BadRequestException);
     });
+
+    it('rejects prices with more than two decimal places', () => {
+      expect(() => service.createClass({ ...base, cost: '12.345' })).toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('validates refund policy tiers', () => {
+      expect(() =>
+        service.createClass({
+          ...base,
+          refundPolicy: [{ hoursBeforeStart: 24, percentage: 101 }],
+        }),
+      ).toThrow(BadRequestException);
+    });
+
+    it('rejects coerced or extra refund tier fields', () => {
+      expect(() =>
+        service.createClass({
+          ...base,
+          refundPolicy: [{ hoursBeforeStart: null, percentage: true } as never],
+        }),
+      ).toThrow(BadRequestException);
+      expect(() =>
+        service.createClass({
+          ...base,
+          refundPolicy: [
+            { hoursBeforeStart: 24, percentage: 100, note: 'unexpected' },
+          ],
+        }),
+      ).toThrow(BadRequestException);
+    });
   });
 
   it('loads classes with their locations', async () => {
@@ -235,6 +267,57 @@ describe('ClassesService date validation', () => {
       expect(() => service.updateClass(1, { startDate: 'nope' })).toThrow(
         BadRequestException,
       );
+    });
+
+    it('validates a cutoff update against the persisted refund policy', async () => {
+      prisma.yogaClass.findUniqueOrThrow.mockResolvedValue({
+        startDate: new Date('2026-09-01T10:00:00.000Z'),
+        endDate: new Date('2026-09-01T11:00:00.000Z'),
+        cancellationCutoffHours: 48,
+        refundPolicy: [{ hoursBeforeStart: 48, percentage: 100 }],
+      });
+
+      await expect(
+        service.updateClass(1, { cancellationCutoffHours: 24 }),
+      ).rejects.toThrow(
+        'refundPolicy must include a tier applicable at the cancellation cutoff',
+      );
+      expect(prisma.yogaClass.update).not.toHaveBeenCalled();
+    });
+
+    it('validates a refund policy update against the effective cutoff', async () => {
+      prisma.yogaClass.findUniqueOrThrow.mockResolvedValue({
+        startDate: new Date('2026-09-01T10:00:00.000Z'),
+        endDate: new Date('2026-09-01T11:00:00.000Z'),
+        cancellationCutoffHours: 24,
+        refundPolicy: [{ hoursBeforeStart: 24, percentage: 100 }],
+      });
+
+      await expect(
+        service.updateClass(1, {
+          refundPolicy: [{ hoursBeforeStart: 48, percentage: 100 }],
+        }),
+      ).rejects.toThrow(
+        'refundPolicy must include a tier applicable at the cancellation cutoff',
+      );
+      expect(prisma.yogaClass.update).not.toHaveBeenCalled();
+    });
+
+    it('accepts a refund policy and cutoff update when the pair is compatible', async () => {
+      prisma.yogaClass.findUniqueOrThrow.mockResolvedValue({
+        startDate: new Date('2026-09-01T10:00:00.000Z'),
+        endDate: new Date('2026-09-01T11:00:00.000Z'),
+        cancellationCutoffHours: 24,
+        refundPolicy: [{ hoursBeforeStart: 24, percentage: 100 }],
+      });
+      prisma.yogaClass.update.mockResolvedValue({ id: 1 });
+
+      await expect(
+        service.updateClass(1, {
+          cancellationCutoffHours: 12,
+          refundPolicy: [{ hoursBeforeStart: 12, percentage: 50 }],
+        }),
+      ).resolves.toEqual({ id: 1 });
     });
   });
 });

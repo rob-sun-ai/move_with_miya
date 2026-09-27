@@ -49,6 +49,153 @@ export class RegistrationController {
     return this.registrationService.getRegistrationCounts(data.classIds);
   }
 
+  @MessagePattern({ cmd: 'get_class_payment_availability' })
+  getClassPaymentAvailability(data: { classId: number; capacity: number }) {
+    return this.registrationService.getClassPaymentAvailability(
+      data.classId,
+      data.capacity,
+    );
+  }
+
+  @MessagePattern({ cmd: 'create_or_get_pending_payment' })
+  createOrGetPendingPayment(data: {
+    userId: string;
+    classId: number;
+    capacity: number;
+    amountCents: number;
+    currency: string;
+    expiresAt: string;
+  }) {
+    return this.registrationService.createOrGetPendingPayment(data);
+  }
+
+  @MessagePattern({ cmd: 'attach_checkout_session' })
+  attachCheckoutSession(data: {
+    paymentId: string;
+    stripeCheckoutSessionId: string;
+  }) {
+    return this.registrationService.attachCheckoutSession(data);
+  }
+
+  @MessagePattern({ cmd: 'get_payment_by_id' })
+  getPaymentById(data: { id: string }) {
+    return this.registrationService.getPaymentById(data.id);
+  }
+
+  @MessagePattern({ cmd: 'get_payment_by_checkout_session' })
+  getPaymentByCheckoutSession(data: { stripeCheckoutSessionId: string }) {
+    return this.registrationService.getPaymentByCheckoutSession(
+      data.stripeCheckoutSessionId,
+    );
+  }
+
+  @MessagePattern({ cmd: 'get_payment_by_payment_intent' })
+  getPaymentByPaymentIntent(data: { paymentIntentId: string }) {
+    return this.registrationService.getPaymentByPaymentIntent(
+      data.paymentIntentId,
+    );
+  }
+
+  @MessagePattern({ cmd: 'get_payment_status_for_user' })
+  getPaymentStatusForUser(data: {
+    stripeCheckoutSessionId: string;
+    userId: string;
+  }) {
+    return this.registrationService.getPaymentStatusForUser(
+      data.stripeCheckoutSessionId,
+      data.userId,
+    );
+  }
+
+  @MessagePattern({ cmd: 'finalize_paid_registration' })
+  finalizePaidRegistration(data: {
+    paymentId: string;
+    checkoutSessionId: string;
+    paymentIntentId?: string | null;
+    amountCents: number;
+    currency: string;
+    capacity: number;
+    classStatus: string;
+    classEndAt: string;
+  }) {
+    return this.registrationService.finalizePaidRegistration(data);
+  }
+
+  @MessagePattern({ cmd: 'mark_payment_failed' })
+  markPaymentFailed(data: { id: string; error?: string }) {
+    return this.registrationService.markPaymentFailed(data.id, data.error);
+  }
+
+  @MessagePattern({ cmd: 'mark_payment_expired' })
+  markPaymentExpired(data: { id: string }) {
+    return this.registrationService.markPaymentExpired(data.id);
+  }
+
+  @MessagePattern({ cmd: 'begin_payment_refund' })
+  beginPaymentRefund(data: { paymentId: string; percentage: number }) {
+    return this.registrationService.beginPaymentRefund(data);
+  }
+
+  @MessagePattern({ cmd: 'begin_class_refunds' })
+  beginClassRefunds(data: { classId: number }) {
+    return this.registrationService.beginClassRefunds(data.classId);
+  }
+
+  @MessagePattern({ cmd: 'complete_payment_refund' })
+  completePaymentRefund(data: {
+    paymentId: string;
+    stripeRefundId?: string;
+    amountCents: number;
+  }) {
+    return this.registrationService.completePaymentRefund(data);
+  }
+
+  @MessagePattern({ cmd: 'record_payment_refund' })
+  recordPaymentRefund(data: { paymentId: string; stripeRefundId: string }) {
+    return this.registrationService.recordPaymentRefund(
+      data.paymentId,
+      data.stripeRefundId,
+    );
+  }
+
+  @MessagePattern({ cmd: 'fail_payment_refund' })
+  failPaymentRefund(data: { paymentId: string; error: string }) {
+    return this.registrationService.failPaymentRefund(
+      data.paymentId,
+      data.error,
+    );
+  }
+
+  @MessagePattern({ cmd: 'list_refund_pending_payments' })
+  listRefundPendingPayments() {
+    return this.registrationService.listRefundPendingPayments();
+  }
+
+  @MessagePattern({ cmd: 'get_all_payments' })
+  getAllPayments() {
+    return this.registrationService.getAllPayments();
+  }
+
+  @MessagePattern({ cmd: 'record_stripe_webhook_event' })
+  recordStripeWebhookEvent(data: { stripeEventId: string; eventType: string }) {
+    return this.registrationService.recordStripeWebhookEvent(data);
+  }
+
+  @MessagePattern({ cmd: 'complete_stripe_webhook_event' })
+  completeStripeWebhookEvent(data: { stripeEventId: string }) {
+    return this.registrationService.completeStripeWebhookEvent(
+      data.stripeEventId,
+    );
+  }
+
+  @MessagePattern({ cmd: 'fail_stripe_webhook_event' })
+  failStripeWebhookEvent(data: { stripeEventId: string; error: string }) {
+    return this.registrationService.failStripeWebhookEvent(
+      data.stripeEventId,
+      data.error,
+    );
+  }
+
   @MessagePattern({ cmd: 'get_registration_by_class_and_user' })
   findRegistrationByClassAndUser(data: { classId: number; userId: string }) {
     return this.registrationService.findRegistrationByClassAndUser(
@@ -66,6 +213,7 @@ export class RegistrationController {
     cancellationCutoffHours?: number;
     source?: string;
     reason?: string;
+    refundPercentage?: number;
   }) {
     return this.registrationService.cancelRegistrationByClassAndUser(
       data.classId,
@@ -87,6 +235,7 @@ export class RegistrationController {
     cancellationCutoffHours?: number;
     source?: string;
     reason?: string;
+    refundPercentage?: number;
   }) {
     return this.registrationService.cancelRegistration(data.id, data);
   }
