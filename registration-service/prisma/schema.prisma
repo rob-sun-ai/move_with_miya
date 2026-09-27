@@ -1,7 +1,8 @@
 generator client {
-  provider     = "prisma-client"
-  output       = "../src/generated/prisma"
-  moduleFormat = "cjs"
+  provider        = "prisma-client"
+  output          = "../src/generated/prisma"
+  moduleFormat    = "cjs"
+  previewFeatures = ["partialIndexes"]
 }
 
 datasource db {
@@ -49,10 +50,6 @@ enum RefundStatus {
   NotEligible
 }
 
-// The stripe_payments migration also creates the partial unique index
-// "Payment_active_user_class_key" on (userId, classId) WHERE status IN
-// ('Pending', 'Paid'). Prisma cannot model it, so keep it if a future
-// `prisma migrate dev` proposes dropping it.
 model Payment {
   id                       String       @id @default(uuid())
   userId                   String
@@ -75,6 +72,9 @@ model Payment {
   createdAt                DateTime       @default(now())
   updatedAt                DateTime       @updatedAt
 
+  // At most one checkout in flight or paid per member and class.
+  // Written the way Postgres normalizes it so `prisma migrate diff` sees no drift.
+  @@unique([userId, classId], map: "Payment_active_user_class_key", where: raw("(status = ANY (ARRAY['Pending'::\"PaymentStatus\", 'Paid'::\"PaymentStatus\"]))"))
   @@index([userId, classId, status])
   @@index([classId, status])
   @@index([status, expiresAt])
