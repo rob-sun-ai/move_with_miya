@@ -26,6 +26,7 @@ function CheckoutSuccessContent() {
     if (!sessionId) return;
     let stopped = false;
     let attempts = 0;
+    let nextPoll: number | undefined;
     const poll = async () => {
       try {
         const next = await api<PaymentStatusResponse>(
@@ -49,7 +50,7 @@ function CheckoutSuccessContent() {
       }
       attempts += 1;
       if (!stopped && attempts < 15) {
-        window.setTimeout(poll, 2000);
+        nextPoll = window.setTimeout(poll, 2000);
       } else if (!stopped) {
         setTimedOut(true);
       }
@@ -57,6 +58,7 @@ function CheckoutSuccessContent() {
     void poll();
     return () => {
       stopped = true;
+      window.clearTimeout(nextPoll);
     };
   }, [sessionId]);
 

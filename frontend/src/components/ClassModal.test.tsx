@@ -4,12 +4,57 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from './test-utils';
 import ClassModal from './ClassModal';
 import { yogaClass } from './test-fixtures';
+import { startCheckout } from '@/lib/checkout';
+
+vi.mock('@/lib/checkout', () => ({ startCheckout: vi.fn() }));
 
 const freeYogaClass = { ...yogaClass, cost: '0' };
 
 afterEach(() => vi.restoreAllMocks());
 
 describe('ClassModal', () => {
+  describe('paid classes', () => {
+    function renderPaid() {
+      render(
+        <ClassModal
+          cls={yogaClass}
+          currentUserId="user-1"
+          isRegistered={false}
+          onClose={vi.fn()}
+          onRegisteredChange={vi.fn()}
+        />,
+      );
+    }
+
+    it('sends members to Stripe Checkout instead of registering', async () => {
+      const user = userEvent.setup();
+      const fetchMock = vi.spyOn(global, 'fetch');
+      vi.mocked(startCheckout).mockResolvedValue(undefined);
+      renderPaid();
+
+      await user.click(screen.getByRole('button', { name: 'Register' }));
+
+      expect(startCheckout).toHaveBeenCalledWith(1);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        Object.assign(new Error('Class is full'), { status: 409 }),
+        'Class is full',
+      ],
+      [new Error(''), 'Registration failed.'],
+    ])('shows why checkout could not start: %s', async (error, message) => {
+      const user = userEvent.setup();
+      vi.mocked(startCheckout).mockRejectedValue(error);
+      renderPaid();
+
+      await user.click(screen.getByRole('button', { name: 'Register' }));
+
+      expect(await screen.findByText(message)).toBeInTheDocument();
+    });
+  });
+
   it('registers a signed-in user', async () => {
     const user = userEvent.setup();
     const onRegisteredChange = vi.fn();
