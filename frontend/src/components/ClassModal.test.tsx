@@ -5,6 +5,8 @@ import { render } from './test-utils';
 import ClassModal from './ClassModal';
 import { yogaClass } from './test-fixtures';
 
+const freeYogaClass = { ...yogaClass, cost: '0' };
+
 afterEach(() => vi.restoreAllMocks());
 
 describe('ClassModal', () => {
@@ -18,7 +20,7 @@ describe('ClassModal', () => {
       );
     render(
       <ClassModal
-        cls={yogaClass}
+        cls={freeYogaClass}
         currentUserId="user-1"
         isRegistered={false}
         onClose={vi.fn()}
@@ -45,7 +47,7 @@ describe('ClassModal', () => {
     );
     render(
       <ClassModal
-        cls={yogaClass}
+        cls={freeYogaClass}
         currentUserId="user-1"
         isRegistered
         onClose={vi.fn()}
@@ -70,7 +72,7 @@ describe('ClassModal', () => {
     const user = userEvent.setup();
     render(
       <ClassModal
-        cls={{ ...yogaClass, isPrivate: true }}
+        cls={{ ...freeYogaClass, isPrivate: true }}
         currentUserId="user-1"
         isRegistered={false}
         onClose={vi.fn()}
@@ -91,7 +93,7 @@ describe('ClassModal', () => {
     render(
       <ClassModal
         cls={{
-          ...yogaClass,
+          ...freeYogaClass,
           endDate: '2000-01-01T11:00:00.000Z',
           startDate: '2000-01-01T10:00:00.000Z',
         }}

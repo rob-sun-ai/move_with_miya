@@ -8,6 +8,7 @@ import type {
   AuthUser,
   ContactSubmission,
   Location,
+  Payment,
   Registration,
   YogaClass,
 } from '@/lib/types';
@@ -25,14 +26,21 @@ async function fetchAdminData(cookieString: string) {
     cookie: cookieString,
   };
 
-  const [classesRes, locationsRes, contactRes, usersRes, registrationsRes] =
-    await Promise.all([
-      fetch(`${BACKEND_URL}/classes`, { cache: 'no-store', headers }),
-      fetch(`${BACKEND_URL}/locations`, { cache: 'no-store', headers }),
-      fetch(`${BACKEND_URL}/contact`, { cache: 'no-store', headers }),
-      fetch(`${USER_SERVICE_URL}/users`, { cache: 'no-store', headers }),
-      fetch(`${BACKEND_URL}/registration`, { cache: 'no-store', headers }),
-    ]);
+  const [
+    classesRes,
+    locationsRes,
+    contactRes,
+    usersRes,
+    registrationsRes,
+    paymentsRes,
+  ] = await Promise.all([
+    fetch(`${BACKEND_URL}/classes`, { cache: 'no-store', headers }),
+    fetch(`${BACKEND_URL}/locations`, { cache: 'no-store', headers }),
+    fetch(`${BACKEND_URL}/contact`, { cache: 'no-store', headers }),
+    fetch(`${USER_SERVICE_URL}/users`, { cache: 'no-store', headers }),
+    fetch(`${BACKEND_URL}/registration`, { cache: 'no-store', headers }),
+    fetch(`${BACKEND_URL}/checkout/payments`, { cache: 'no-store', headers }),
+  ]);
 
   const classes: YogaClass[] = classesRes.ok ? await classesRes.json() : [];
   const locations: Location[] = locationsRes.ok
@@ -45,8 +53,9 @@ async function fetchAdminData(cookieString: string) {
   const registrations: Registration[] = registrationsRes.ok
     ? await registrationsRes.json()
     : [];
+  const payments: Payment[] = paymentsRes.ok ? await paymentsRes.json() : [];
 
-  return { classes, locations, contact, users, registrations };
+  return { classes, locations, contact, users, registrations, payments };
 }
 
 export default async function AdminPage() {
@@ -83,6 +92,7 @@ export default async function AdminPage() {
         initialContact={data.contact}
         initialUsers={data.users}
         initialRegistrations={data.registrations}
+        initialPayments={data.payments}
       />
     </Box>
   );

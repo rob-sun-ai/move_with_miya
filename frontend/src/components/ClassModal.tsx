@@ -17,6 +17,7 @@ import CircularProgress from '@mui/material/CircularProgress';
 import Link from 'next/link';
 import { format } from 'date-fns';
 import { api } from '@/lib/api';
+import { startCheckout } from '@/lib/checkout';
 import { formatCost, fullName, locationLabel } from '@/lib/format';
 import type { YogaClass } from '@/lib/types';
 
@@ -55,6 +56,10 @@ export default function ClassModal({
     if (!currentUserId) return;
     setStatus('loading');
     try {
+      if (Number(cls.cost) > 0) {
+        await startCheckout(cls.id);
+        return;
+      }
       const registration = await api<{ status: string }>(
         `/api/registration/class/${cls.id}/user/${currentUserId}`,
         {

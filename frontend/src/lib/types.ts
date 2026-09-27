@@ -33,7 +33,13 @@ export interface YogaClass {
   registrationCount?: number;
   waitlistEnabled?: boolean;
   cancellationCutoffHours?: number;
+  refundPolicy?: RefundTier[];
   teachers?: Teacher[];
+}
+
+export interface RefundTier {
+  hoursBeforeStart: number;
+  percentage: number;
 }
 
 export type UserRole = 'ADMIN' | 'MEMBER' | 'VIEWER' | 'TEACHER';
@@ -96,4 +102,23 @@ export interface AdminUser {
   avatarUrl?: string | null;
   role: string;
   banned: boolean;
+}
+
+export interface Payment {
+  id: string;
+  userId: string;
+  classId: number;
+  amountCents: number;
+  currency: string;
+  status: string;
+  refundStatus: string;
+  refundPercentage?: number | null;
+  refundAmountCents?: number | null;
+  stripeCheckoutSessionId?: string | null;
+  stripePaymentIntentId?: string | null;
+  stripeRefundId?: string | null;
+  createdAt?: string;
+  paidAt?: string | null;
+  refundedAt?: string | null;
+  refundError?: string | null;
 }

@@ -6,6 +6,8 @@ import ClassDetailClient from './ClassDetailClient';
 import { yogaClass } from './test-fixtures';
 import type { AuthUser } from '@/lib/types';
 
+const freeYogaClass = { ...yogaClass, cost: '0' };
+
 const user: AuthUser = {
   id: 'user-1',
   email: 'person@example.com',
@@ -19,7 +21,7 @@ afterEach(() => vi.restoreAllMocks());
 
 describe('ClassDetailClient', () => {
   it('offers sign-in when there is no user', () => {
-    render(<ClassDetailClient cls={yogaClass} />);
+    render(<ClassDetailClient cls={freeYogaClass} />);
     expect(
       screen.getByRole('link', { name: 'Sign in to register' }),
     ).toHaveAttribute('href', '/login');
@@ -37,7 +39,10 @@ describe('ClassDetailClient', () => {
         return new Response(JSON.stringify({ id: 1 }), { status: 200 });
       });
     render(
-      <ClassDetailClient cls={{ ...yogaClass, isPrivate: true }} user={user} />,
+      <ClassDetailClient
+        cls={{ ...freeYogaClass, isPrivate: true }}
+        user={user}
+      />,
     );
 
     await waitFor(() =>
@@ -88,7 +93,7 @@ describe('ClassDetailClient', () => {
     });
     render(
       <ClassDetailClient
-        cls={yogaClass}
+        cls={freeYogaClass}
         user={{ ...user, yogaExperience: 'Beginner' }}
       />,
     );

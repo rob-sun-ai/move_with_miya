@@ -25,6 +25,7 @@ import TextField from '@mui/material/TextField';
 import Link from 'next/link';
 import { format } from 'date-fns';
 import { api } from '@/lib/api';
+import { startCheckout } from '@/lib/checkout';
 import { formatCost, fullName, locationLabel } from '@/lib/format';
 import type { AuthUser, Registration, YogaClass } from '@/lib/types';
 
@@ -85,6 +86,10 @@ export default function ClassDetailClient({
     if (!user) return;
     setStatus('loading');
     try {
+      if (Number(cls.cost) > 0) {
+        await startCheckout(cls.id);
+        return;
+      }
       const registration = await api<Registration>(
         `/api/registration/class/${cls.id}/user/${user.id}`,
         {
