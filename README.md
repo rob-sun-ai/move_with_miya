@@ -190,6 +190,7 @@ The production stack requires:
 - `RELEASE_VERSION` (the image tag, e.g. the git SHA)
 - `GRAFANA_ADMIN_PASSWORD`
 - `ALERT_EMAIL_TO` (alerts are sent through Resend using `RESEND_API_KEY` and `RESEND_FROM_EMAIL`)
+- `AGE_RECIPIENT` and `BACKUP_REMOTE` for encrypted off-host backups
 
 Production checklist:
 
@@ -203,3 +204,4 @@ Production checklist:
 - [ ] Confirm the admin Observability tab is available and non-admin requests receive `403`.
 - [ ] Send a test alert (see the runbook) and confirm it arrives at `ALERT_EMAIL_TO`.
 - [ ] Point `ALERT_HEARTBEAT_URL` at a dead man's switch and confirm it receives the `Watchdog` heartbeat.
+- [ ] Enable the nightly backup timer and complete the restore drill documented in [docs/production-runbook.md](docs/production-runbook.md).

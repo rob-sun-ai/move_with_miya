@@ -81,3 +81,56 @@ docker compose --env-file "$ENV_FILE" -f docker-compose.prod.yml exec alertmanag
 ```
 
 Every rule is unit-tested in [ops/observability/alerts.test.yml](../ops/observability/alerts.test.yml) (`promtool test rules`), and [ops/observability/test-alertmanager.sh](../ops/observability/test-alertmanager.sh) starts the real Alertmanager service to check its rendered recipients and secret; CI runs both.
+
+## Backups
+
+Every night at 03:30 UTC, [ops/backup-postgres.sh](../ops/backup-postgres.sh):
+
+1. dumps each database (`miya_users`, `miya_classes`, `miya_registrations`) with `pg_dump`,
+2. encrypts each dump with [age](https://age-encryption.org) for `AGE_RECIPIENT`, so the server can create backups but cannot read them,
+3. copies the encrypted files and a `SHA256SUMS` file to `BACKUP_REMOTE` with rclone, never overwriting existing files, and
+4. prunes local copies older than `BACKUP_LOCAL_RETENTION_DAYS` (default 7).
+
+If a run fails, a `BackupFailed` alert is emailed and stays active until the next successful run clears it. Redis (sessions, rate limits) and RabbitMQ (queues) are not backed up; they rebuild themselves. netcup server snapshots are a useful extra layer but not a substitute: they stay with the same provider and are not consistent database dumps.
+
+### One-time setup
+
+1. **Encryption key, on your own machine (not the server).** Run `age-keygen -o miya-backup-key.txt`. Store the file in your password manager plus one offline copy; without it no backup can be read. Put the printed public key (`age1…`) in `AGE_RECIPIENT`.
+2. **Off-host storage: Backblaze B2, EU Central region.**
+   - Create a private bucket.
+   - Add a lifecycle rule that hides files 30 days after upload and deletes them 1 day after hiding. B2 then enforces retention, not the server.
+   - Create an upload key for the server that cannot delete, for example with the B2 CLI: `b2 key create --bucket <bucket> miya-backup-upload listBuckets,listFiles,writeFiles`. A compromised server then cannot erase the backups.
+   - Create a separate read key (`listBuckets,listFiles,readFiles`) for restores and keep it off the server.
+3. **Server.** Install the tools with `sudo apt install age rclone`, then fill in the backup and `RCLONE_CONFIG_B2_*` values in the env file. rclone reads its remote from those variables, so no rclone config file is needed. Test with `sudo ENV_FILE=/etc/move-with-miya/env.production ./ops/backup-postgres.sh`.
+4. **Schedule.** Copy `ops/systemd/move-with-miya-backup.{service,timer}` to `/etc/systemd/system/`, adjust the checkout and env-file paths in the service, then run `sudo systemctl daemon-reload && sudo systemctl enable --now move-with-miya-backup.timer`. `systemctl list-timers move-with-miya-backup.timer` shows the next run.
+
+### Restore drill (monthly, on your own machine)
+
+Prove that a backup can actually be decrypted and restored:
+
+```bash
+rclone copy b2:<bucket>/postgres ./drill --include '*_<timestamp>*'   # read key
+cd drill && sha256sum -c SHA256SUMS_<timestamp>.txt
+docker run -d --name miya-restore-drill -e POSTGRES_PASSWORD=drill postgres:16-alpine
+age -d -i miya-backup-key.txt miya_registrations_<timestamp>.dump.age \
+  | docker exec -i miya-restore-drill pg_restore -U postgres --no-owner --create -d postgres
+docker exec miya-restore-drill psql -U postgres -d miya_registrations -c 'SELECT count(*) FROM "Payment";'
+docker rm -f miya-restore-drill
+```
+
+### Recovering production
+
+Stop the application services, restore, then start them again so migrations and healthchecks run:
+
+```bash
+compose() { docker compose --env-file "$ENV_FILE" -f docker-compose.prod.yml "$@"; }
+compose stop user-service backend classes-service registration-service
+RCLONE_CONFIG_B2READ_TYPE=b2 RCLONE_CONFIG_B2READ_ACCOUNT=<read-key-id> \
+RCLONE_CONFIG_B2READ_KEY=<read-key> RESTORE_REMOTE=b2read:<bucket>/postgres \
+CONFIRM_RESTORE=YES ALLOW_DESTRUCTIVE_RESTORE=YES \
+AGE_IDENTITY=/secure/miya-backup-key.txt BACKUP_TIMESTAMP=<timestamp> \
+ENV_FILE=/etc/move-with-miya/env.production ./ops/restore-postgres.sh
+compose up -d user-service backend classes-service registration-service
+```
+
+Files that are not in `BACKUP_DIR` are fetched from `RESTORE_REMOTE`, a remote using the read key (the server's own key can only upload). Checksums are verified before anything is restored. Remove the read key and the private age key from the server afterwards.

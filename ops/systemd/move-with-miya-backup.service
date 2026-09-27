@@ -1,0 +1,12 @@
+# Install: see "Backups" in docs/production-runbook.md.
+[Unit]
+Description=Move with Miya encrypted PostgreSQL backup
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+# Adjust both paths to the deployment checkout and env file.
+WorkingDirectory=/opt/move_with_miya
+Environment=ENV_FILE=/etc/move-with-miya/env.production
+ExecStart=/opt/move_with_miya/ops/backup-postgres.sh
