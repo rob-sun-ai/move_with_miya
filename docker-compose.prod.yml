@@ -69,6 +69,8 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?GOOGLE_CLIENT_ID is required}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:?GOOGLE_CLIENT_SECRET is required}
       GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL:?GOOGLE_CALLBACK_URL is required}
+      OTEL_SERVICE_NAME: user-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318/v1/traces}
       RELEASE_VERSION: ${RELEASE_VERSION:?RELEASE_VERSION is required}
     depends_on:
       redis:
@@ -140,6 +142,9 @@ services:
       USER_HEALTH_URL: http://user-service:3001/health/ready
       CLASSES_HEALTH_URL: http://classes-service:3004/health/ready
       REGISTRATION_HEALTH_URL: http://registration-service:3005/health/ready
+      GRAFANA_PUBLIC_URL: ${GRAFANA_PUBLIC_URL:-}
+      OTEL_SERVICE_NAME: backend
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318/v1/traces}
       RELEASE_VERSION: ${RELEASE_VERSION:?RELEASE_VERSION is required}
     depends_on:
       redis:
@@ -169,6 +174,8 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/miya_classes
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672
       HEALTH_PORT: 3004
+      OTEL_SERVICE_NAME: classes-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318/v1/traces}
       RELEASE_VERSION: ${RELEASE_VERSION:?RELEASE_VERSION is required}
     depends_on:
       rabbitmq:
@@ -207,6 +214,8 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/miya_registrations
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672
       HEALTH_PORT: 3005
+      OTEL_SERVICE_NAME: registration-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318/v1/traces}
       RELEASE_VERSION: ${RELEASE_VERSION:?RELEASE_VERSION is required}
     depends_on:
       rabbitmq:
@@ -288,6 +297,81 @@ services:
       user-service:
         condition: service_healthy
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.123.0
+    restart: unless-stopped
+    command: ['--config=/etc/otelcol-contrib/config.yaml']
+    volumes:
+      - ./ops/observability/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro,z
+    depends_on:
+      - tempo
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-14d}'
+    volumes:
+      - prometheus-data:/prometheus
+      - ./ops/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro,z
+    depends_on:
+      backend:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+      classes-service:
+        condition: service_healthy
+      registration-service:
+        condition: service_healthy
+
+  loki:
+    image: grafana/loki:3.5.0
+    restart: unless-stopped
+    command: ['-config.file=/etc/loki/config.yaml']
+    volumes:
+      - loki-data:/loki
+      - ./ops/observability/loki.yaml:/etc/loki/config.yaml:ro,z
+
+  promtail:
+    image: grafana/promtail:3.5.0
+    restart: unless-stopped
+    command: ['-config.file=/etc/promtail/config.yaml']
+    volumes:
+      - ./ops/observability/promtail.yaml:/etc/promtail/config.yaml:ro,z
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro,z
+      - promtail-data:/tmp
+    depends_on:
+      - loki
+
+  tempo:
+    image: grafana/tempo:2.7.2
+    restart: unless-stopped
+    command: ['-config.file=/etc/tempo/config.yaml']
+    volumes:
+      - tempo-data:/var/tempo
+      - ./ops/observability/tempo.yaml:/etc/tempo/config.yaml:ro,z
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./ops/observability/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro,z
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+
 volumes:
   redis-data:
   postgres-data:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+  tempo-data:
+  promtail-data:

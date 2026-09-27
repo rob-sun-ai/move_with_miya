@@ -188,6 +188,7 @@ The production stack requires:
 - `CONTACT_CHALLENGE_SECRET`, `TURNSTILE_SECRET_KEY`, and `TURNSTILE_HOSTNAME`
 - `PUBLIC_HOST`, `TLS_CERT_FILE`, and `TLS_KEY_FILE` (inside `TLS_CERT_DIR`, default `/etc/letsencrypt`)
 - `RELEASE_VERSION` (the image tag, e.g. the git SHA)
+- `GRAFANA_ADMIN_PASSWORD`
 
 Production checklist:
 
@@ -198,3 +199,4 @@ Production checklist:
 - [ ] Use Stripe live credentials only in production and verify webhook signature failures are rejected.
 - [ ] Set checkout rate limits appropriate to the deployment and confirm Redis is reachable before accepting payments.
 - [ ] Verify `POSTGRES_PASSWORD` and `RABBITMQ_PASS` are unique, strong, URL-safe credentials (they are embedded in connection URLs) before exposing the stack publicly.
+- [ ] Confirm the admin Observability tab is available and non-admin requests receive `403`.

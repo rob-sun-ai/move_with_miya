@@ -146,6 +146,7 @@ jobs:
       TLS_CERT_FILE: /tmp/fullchain.pem
       TLS_KEY_FILE: /tmp/privkey.pem
       RELEASE_VERSION: ci
+      GRAFANA_ADMIN_PASSWORD: ci-grafana-password-0123456789
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
