@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Alert from '@mui/material/Alert';
 import CircularProgress from '@mui/material/CircularProgress';
@@ -17,10 +17,7 @@ interface PaymentStatusResponse {
 
 function CheckoutSuccessContent() {
   const searchParams = useSearchParams();
-  const sessionId = useMemo(
-    () => searchParams.get('session_id'),
-    [searchParams],
-  );
+  const sessionId = searchParams.get('session_id');
   const [result, setResult] = useState<PaymentStatusResponse | null>(null);
   const [error, setError] = useState('');
   const [timedOut, setTimedOut] = useState(false);
@@ -36,6 +33,7 @@ function CheckoutSuccessContent() {
         );
         if (stopped) return;
         setResult(next);
+        setError('');
         if (next.registration?.status === 'Registered') return;
         if (
           ['Failed', 'Expired', 'Refunded'].includes(next.payment.status) ||
@@ -68,34 +66,34 @@ function CheckoutSuccessContent() {
   const refunded =
     result?.payment.status === 'Refunded' ||
     result?.payment.refundStatus === 'Succeeded';
-  const displayedError =
-    error ||
-    (paymentFailed
-      ? 'This payment could not be completed. Please try checkout again.'
-      : refunded
-        ? 'This payment was refunded because the registration could not be completed.'
-        : timedOut
-          ? 'Payment confirmation is taking longer than expected. Check your dashboard shortly.'
-          : '') ||
-    (!sessionId ? 'This checkout link is missing its session ID.' : '');
+  const fatalError = sessionId
+    ? error
+    : 'This checkout link is missing its session ID.';
+  const warning = paymentFailed
+    ? 'This payment could not be completed. Please try checkout again.'
+    : refunded
+      ? 'This payment was refunded because the registration could not be completed.'
+      : timedOut
+        ? 'Payment confirmation is taking longer than expected. Check your dashboard shortly.'
+        : '';
   return (
     <Container maxWidth="sm" sx={{ py: 8 }}>
       <Stack spacing={3}>
         <Typography variant="h4" component="h1">
           {registered
             ? 'Registration confirmed'
-            : paymentFailed || refunded || timedOut
+            : fatalError || warning
               ? 'Payment confirmation incomplete'
               : 'Confirming your payment'}
         </Typography>
-        {displayedError ? (
-          <Alert severity="error">{displayedError}</Alert>
-        ) : registered ? (
+        {registered ? (
           <Alert severity="success">
             Your payment was received and your class registration is confirmed.
           </Alert>
-        ) : paymentFailed || refunded || timedOut ? (
-          <Alert severity="warning">{displayedError}</Alert>
+        ) : fatalError ? (
+          <Alert severity="error">{fatalError}</Alert>
+        ) : warning ? (
+          <Alert severity="warning">{warning}</Alert>
         ) : (
           <Alert severity="info" icon={<CircularProgress size={20} />}>
             Payment received; confirming registration. This page will update

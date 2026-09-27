@@ -125,6 +125,34 @@ export default function AdminDashboard({
     setNotice(null);
   };
 
+  // Refreshes the payments tab after an action that may have queued refunds.
+  // The action itself already succeeded, so a failed refresh is not an error.
+  const reloadPayments = async () => {
+    try {
+      setPayments(await api<Payment[]>('/api/checkout/payments'));
+    } catch {
+      // Keep the current list.
+    }
+  };
+
+  const handleRefund = async (payment: Payment) => {
+    try {
+      // With no refund requested yet (or one ruled ineligible by the member
+      // cancellation policy) issue a full refund; otherwise retry as queued.
+      const fullRefund =
+        payment.refundStatus === 'None' ||
+        payment.refundStatus === 'NotEligible';
+      await api(`/api/checkout/payments/${payment.id}/refund`, {
+        method: 'POST',
+        ...(fullRefund && { body: JSON.stringify({ percentage: 100 }) }),
+      });
+      await reloadPayments();
+      showNotice('Refund request processed.');
+    } catch (err) {
+      showError(err instanceof Error ? err.message : 'Refund failed.');
+    }
+  };
+
   const handleTabChange = (value: TabValue) => {
     setTab(value);
   };
@@ -290,7 +318,7 @@ export default function AdminDashboard({
       ]);
       setClasses(updatedClasses);
       setRegistrations(updatedRegistrations);
-      setPayments(await api<Payment[]>('/api/checkout/payments'));
+      await reloadPayments();
       showNotice('Class canceled and registrations updated.');
     } catch (err) {
       showError(
@@ -369,7 +397,7 @@ export default function AdminDashboard({
             : reg,
         ),
       );
-      setPayments(await api<Payment[]>('/api/checkout/payments'));
+      await reloadPayments();
       showNotice('Registration cancelled.');
     } catch (err) {
       showError(err instanceof Error ? err.message : 'Cancel failed.');
@@ -775,24 +803,7 @@ export default function AdminDashboard({
                       payment.refundStatus !== 'Succeeded' && (
                         <Button
                           size="small"
-                          onClick={async () => {
-                            try {
-                              await api(
-                                `/api/checkout/payments/${payment.id}/refund`,
-                                { method: 'POST' },
-                              );
-                              setPayments(
-                                await api<Payment[]>('/api/checkout/payments'),
-                              );
-                              showNotice('Refund request processed.');
-                            } catch (err) {
-                              showError(
-                                err instanceof Error
-                                  ? err.message
-                                  : 'Refund failed.',
-                              );
-                            }
-                          }}
+                          onClick={() => void handleRefund(payment)}
                         >
                           Refund
                         </Button>

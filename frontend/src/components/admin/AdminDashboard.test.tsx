@@ -9,6 +9,7 @@ import type {
   AdminUser,
   ContactSubmission,
   Location,
+  Payment,
   Registration,
 } from '@/lib/types';
 
@@ -106,6 +107,39 @@ describe('AdminDashboard', () => {
     expect(screen.getByText('Name is required.')).toBeInTheDocument();
     expect(screen.getByText('Start date is required.')).toBeInTheDocument();
     expect(screen.getByText('End date is required.')).toBeInTheDocument();
+  });
+
+  it('issues a full refund for a payment ruled ineligible by the member policy', async () => {
+    const user = userEvent.setup();
+    const payment: Payment = {
+      id: 'payment-1234',
+      userId: 'member-1',
+      classId: yogaClass.id,
+      amountCents: 2500,
+      currency: 'usd',
+      status: 'Paid',
+      refundStatus: 'NotEligible',
+      refundAmountCents: 0,
+    };
+    const fetchMock = vi
+      .spyOn(global, 'fetch')
+      .mockImplementation(() =>
+        Promise.resolve(new Response(JSON.stringify([payment]))),
+      );
+    renderDashboard({ initialPayments: [payment] });
+    await user.click(screen.getByRole('tab', { name: 'Payments' }));
+    await user.click(screen.getByRole('button', { name: 'Refund' }));
+
+    expect(
+      await screen.findByText('Refund request processed.'),
+    ).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/checkout/payments/payment-1234/refund',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ percentage: 100 }),
+      }),
+    );
   });
 
   it('marks contact submissions read and reports the result', async () => {
