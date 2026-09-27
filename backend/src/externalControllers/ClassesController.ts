@@ -13,11 +13,13 @@ import {
   Query,
   NotFoundException,
   UseGuards,
+  Optional,
 } from '@nestjs/common';
 import { ClientProxy } from '@nestjs/microservices';
 import { AdminGuard } from '../common/guards/admin.guard';
 import { sendRpc } from '../common/rpc';
 import { CancelClassDto } from './dto/cancel-class.dto';
+import { StripeService } from './stripe.service';
 
 interface Teacher {
   id: string;
@@ -51,6 +53,7 @@ export class ClassesController {
     @Inject('CLASSES_SERVICE') private readonly classesClient: ClientProxy,
     @Inject('REGISTRATION_SERVICE')
     private readonly registrationClient: ClientProxy,
+    @Optional() private readonly stripeService?: StripeService,
   ) {}
 
   private rpcClasses<T = unknown>(cmd: string, payload: object) {
@@ -159,23 +162,12 @@ export class ClassesController {
       id,
       status: 'Canceled',
     });
-    try {
-      await this.rpcRegistrations('cancel_class_registrations', {
-        classId: id,
-        reason: body.reason?.trim() || 'Class canceled',
-        source: 'class-cancellation',
-      });
-    } catch (error) {
-      // The databases are separate. Compensate when the dependent lifecycle
-      // operation cannot be completed so the class is not left half-canceled.
-      try {
-        await this.rpcClasses('update_class', { id, status: cls.status });
-      } catch {
-        // The original error remains the useful response; reconciliation can
-        // retry the class-wide cancellation if compensation also fails.
-      }
-      throw error;
-    }
+    await this.rpcRegistrations('cancel_class_registrations', {
+      classId: id,
+      reason: body.reason?.trim() || 'Class canceled',
+      source: 'class-cancellation',
+    });
+    if (this.stripeService) await this.stripeService.refundClassPayments(id);
     return updated;
   }
 

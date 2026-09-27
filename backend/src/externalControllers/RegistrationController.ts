@@ -1,5 +1,6 @@
 import {
   Body,
+  ConflictException,
   Controller,
   ForbiddenException,
   Delete,
@@ -14,6 +15,7 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
   UseGuards,
+  Optional,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { ClientProxy } from '@nestjs/microservices';
@@ -22,6 +24,7 @@ import { AdminGuard } from '../common/guards/admin.guard';
 import { StaffGuard } from '../common/guards/staff.guard';
 import { sendRpc } from '../common/rpc';
 import { UpdateRegistrationDto } from './dto/update-registration.dto';
+import { StripeService } from './stripe.service';
 
 interface Registration {
   id: number;
@@ -52,7 +55,32 @@ export class RegistrationController {
     private readonly registrationClient: ClientProxy,
     @Inject('CLASSES_SERVICE')
     private readonly classesClient: ClientProxy,
+    @Optional() private readonly stripeService?: StripeService,
   ) {}
+
+  private refundPercentageForMemberCancellation(cls: {
+    startDate?: string;
+    cancellationCutoffHours?: number;
+    refundPolicy?: Array<{ hoursBeforeStart: number; percentage: number }>;
+  }) {
+    if (!cls.startDate) return undefined;
+    const cutoffHours = cls.cancellationCutoffHours ?? 24;
+    const startTime = new Date(cls.startDate).getTime();
+    const cutoff = startTime - cutoffHours * 3_600_000;
+    if (Date.now() >= cutoff) return undefined;
+    const hoursUntilStart = (startTime - Date.now()) / 3_600_000;
+    const tiers = (
+      cls.refundPolicy ?? [{ hoursBeforeStart: cutoffHours, percentage: 100 }]
+    ).filter(
+      (tier) =>
+        Number.isInteger(tier.hoursBeforeStart) &&
+        Number.isInteger(tier.percentage) &&
+        tier.hoursBeforeStart <= hoursUntilStart,
+    );
+    if (tiers.length === 0) return 0;
+    return tiers.sort((a, b) => b.hoursBeforeStart - a.hoursBeforeStart)[0]
+      .percentage;
+  }
 
   private rpc<T = unknown>(cmd: string, payload: object) {
     return sendRpc<T>(
@@ -81,8 +109,13 @@ export class RegistrationController {
         endDate?: string;
         status?: string;
         isPrivate?: boolean;
+        cost?: string | number;
         waitlistEnabled?: boolean;
         cancellationCutoffHours?: number;
+        refundPolicy?: Array<{
+          hoursBeforeStart: number;
+          percentage: number;
+        }>;
       } | null>(this.classesClient.send({ cmd: 'get_class' }, { id: classId }));
     } catch {
       throw new ServiceUnavailableException('Class service unavailable');
@@ -210,6 +243,9 @@ export class RegistrationController {
     if (cls.endDate && new Date(cls.endDate).getTime() <= Date.now()) {
       throw new ForbiddenException('This class has already ended');
     }
+    if (Number(cls.cost ?? 0) > 0) {
+      throw new ConflictException('Paid classes require Stripe Checkout');
+    }
     const capacity = cls.capacity;
     if (
       capacity === undefined ||
@@ -284,21 +320,31 @@ export class RegistrationController {
     if (!cls || cls.capacity === undefined || !cls.startDate) {
       throw new NotFoundException(`Class ${classId} not found`);
     }
-    return this.rpc<Registration>('cancel_registration_by_class_and_user', {
-      classId,
-      userId,
-      capacity: cls.capacity,
-      classStartAt: cls.startDate,
-      cancellationCutoffHours: cls.cancellationCutoffHours ?? 24,
-      source: 'member',
-    });
+    const result = await this.rpc<Registration & { refundPaymentId?: string }>(
+      'cancel_registration_by_class_and_user',
+      {
+        classId,
+        userId,
+        capacity: cls.capacity,
+        classStartAt: cls.startDate,
+        cancellationCutoffHours: cls.cancellationCutoffHours ?? 24,
+        source: 'member',
+        refundPercentage: this.refundPercentageForMemberCancellation(cls),
+      },
+    );
+    if (result.refundPaymentId && this.stripeService) {
+      await this.stripeService
+        .refundPayment(result.refundPaymentId)
+        .catch(() => undefined);
+    }
+    return result;
   }
 
   @UseGuards(AdminGuard)
   @Post(':id/cancel')
   async cancelRegistration(
     @Param('id', ParseIntPipe) id: number,
-    @Body() body: { reason?: string },
+    @Body() body: { reason?: string; refundPercentage?: number },
   ) {
     const registration = await this.rpc<Registration>('get_registration', {
       id,
@@ -307,14 +353,24 @@ export class RegistrationController {
     if (!cls || cls.capacity === undefined) {
       throw new NotFoundException(`Class ${registration.classId} not found`);
     }
-    return this.rpc<Registration>('cancel_registration', {
-      id,
-      capacity: cls.capacity,
-      classStartAt: cls.startDate,
-      cancellationCutoffHours: cls.cancellationCutoffHours ?? 24,
-      source: 'admin',
-      reason: body.reason?.trim() || 'Admin cancellation',
-    });
+    const result = await this.rpc<Registration & { refundPaymentId?: string }>(
+      'cancel_registration',
+      {
+        id,
+        capacity: cls.capacity,
+        classStartAt: cls.startDate,
+        cancellationCutoffHours: cls.cancellationCutoffHours ?? 24,
+        source: 'admin',
+        reason: body.reason?.trim() || 'Admin cancellation',
+        refundPercentage: body.refundPercentage ?? 100,
+      },
+    );
+    if (result.refundPaymentId && this.stripeService) {
+      await this.stripeService
+        .refundPayment(result.refundPaymentId)
+        .catch(() => undefined);
+    }
+    return result;
   }
 
   @UseGuards(AdminGuard)
@@ -330,18 +386,5 @@ export class RegistrationController {
   @Delete(':id')
   cancelRegistrationLegacy(@Param('id', ParseIntPipe) id: number) {
     return this.cancelRegistration(id, {});
-  }
-
-  @UseGuards(AdminGuard)
-  @Post('class/:classId/cancel')
-  cancelClassRegistrations(
-    @Param('classId', ParseIntPipe) classId: number,
-    @Body() body: { reason?: string },
-  ) {
-    return this.rpc('cancel_class_registrations', {
-      classId,
-      reason: body.reason?.trim() || 'Class canceled',
-      source: 'class-cancellation',
-    });
   }
 }

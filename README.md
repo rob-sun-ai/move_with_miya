@@ -54,12 +54,32 @@ SESSION_SECRET=change-me-to-a-random-string
 RESEND_API_KEY=re_...
 CONTACT_EMAIL_TO=studio@example.com
 RESEND_FROM_EMAIL=Move with Miya <hello@your-domain.example>
+
+# Stripe Checkout (required to charge paid classes)
+PUBLIC_APP_URL=http://localhost:5173
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_CURRENCY=usd
+
+# Distributed checkout abuse protection (Redis-backed)
+CHECKOUT_IP_ATTEMPT_LIMIT=30
+CHECKOUT_IP_ATTEMPT_TTL_MS=600000
+CHECKOUT_USER_ATTEMPT_LIMIT=20
+CHECKOUT_USER_ATTEMPT_TTL_MS=600000
+CHECKOUT_REFUND_ATTEMPT_LIMIT=30
+CHECKOUT_REFUND_ATTEMPT_TTL_MS=600000
 ```
 
 The defaults in `.env.example` (including `DATABASE_URL`, `RABBITMQ_*`, `POSTGRES_*`) work for everything else in development.
 
 Contact submissions are always stored. When the optional Resend settings are
 present, the backend also sends a notification email to `CONTACT_EMAIL_TO`.
+
+Paid-class checkout uses Stripe test mode during development. To forward test
+webhooks locally, run `stripe listen --forward-to localhost:3002/checkout/webhook`
+and copy the printed `whsec_...` value into `STRIPE_WEBHOOK_SECRET`. The
+Checkout success page waits for webhook confirmation before showing a
+registration confirmation.
 
 ## Running locally (with hot reload)
 
@@ -153,9 +173,14 @@ Requires the following to be set in `.env`:
 - `CORS_ORIGIN`
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
 - `GOOGLE_CALLBACK_URL`
+- `PUBLIC_APP_URL`
+- `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and `STRIPE_CURRENCY`
 
 Production checklist:
 
 - [ ] Use real, non-development secrets — never placeholders such as `change-me` or `guest`.
 - [ ] Set `CORS_ORIGIN` and `GOOGLE_CALLBACK_URL` to real deployment URLs, not `localhost`.
+- [ ] Set `PUBLIC_APP_URL` to the HTTPS public application URL and configure the Stripe webhook endpoint at `/api/checkout/webhook`.
+- [ ] Use Stripe live credentials only in production and verify webhook signature failures are rejected.
+- [ ] Set checkout rate limits appropriate to the deployment and confirm Redis is reachable before accepting payments.
 - [ ] Verify `POSTGRES_PASSWORD` and `RABBITMQ_PASS` are unique, strong credentials before exposing the stack publicly.

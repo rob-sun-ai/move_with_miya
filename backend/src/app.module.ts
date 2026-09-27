@@ -17,6 +17,10 @@ import { ContactRateLimitGuard } from './common/guards/contact-rate-limit.guard'
 import { RedisService } from './redis.service';
 import { RegistrationEventsController } from './externalControllers/registration-events.controller';
 import { RegistrationNotificationService } from './externalControllers/registration-notification.service';
+import { StripeController } from './externalControllers/StripeController';
+import { StripeService } from './externalControllers/stripe.service';
+import { CheckoutRateLimitService } from './common/checkout-rate-limit.service';
+import { CheckoutRateLimitGuard } from './common/guards/checkout-rate-limit.guard';
 
 @Module({
   imports: [
@@ -52,6 +56,7 @@ import { RegistrationNotificationService } from './externalControllers/registrat
     RegistrationController,
     ContactController,
     RegistrationEventsController,
+    StripeController,
   ],
   providers: [
     AppService,
@@ -64,6 +69,9 @@ import { RegistrationNotificationService } from './externalControllers/registrat
     ContactRateLimitGuard,
     RedisService,
     RegistrationNotificationService,
+    StripeService,
+    CheckoutRateLimitService,
+    CheckoutRateLimitGuard,
   ],
 })
 export class AppModule {}

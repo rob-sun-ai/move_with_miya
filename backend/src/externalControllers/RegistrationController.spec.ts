@@ -153,6 +153,28 @@ describe('RegistrationController', () => {
       );
     });
 
+    it('rejects direct registration for paid classes', async () => {
+      classesClient.send.mockReturnValue(
+        of({
+          id: 1,
+          capacity: 10,
+          cost: '15.00',
+          endDate: '2099-01-01T00:00:00.000Z',
+        }),
+      );
+
+      await expect(
+        controller.createRegistration(
+          buildRequest(sessionUserId),
+          1,
+          sessionUserId,
+        ),
+      ).rejects.toMatchObject({
+        message: 'Paid classes require Stripe Checkout',
+      });
+      expect(client.send).not.toHaveBeenCalled();
+    });
+
     it('forbids registration for an ended class', async () => {
       classesClient.send.mockReturnValue(
         of({ id: 1, endDate: '2000-01-01T00:00:00.000Z' }),
