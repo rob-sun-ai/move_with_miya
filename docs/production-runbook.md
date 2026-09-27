@@ -54,3 +54,25 @@ Prometheus, Grafana, Loki (with Promtail), Tempo, and the OpenTelemetry Collecto
 - Traces: services export OTLP traces to the collector, which forwards them to Tempo.
 
 Same-host monitoring means observability is unavailable during a host outage. Metrics, logs, and traces are diagnostic data and are not part of the business-data backup set.
+
+## Alerting
+
+Prometheus evaluates [ops/observability/alerts.yml](../ops/observability/alerts.yml) and sends firing alerts to Alertmanager, which emails `ALERT_EMAIL_TO` through Resend's SMTP relay (`smtp.resend.com`, authenticated with `RESEND_API_KEY`, sent from `RESEND_FROM_EMAIL`). The API key reaches Alertmanager as a Compose secret, which needs Docker Compose 2.23 or newer.
+
+| Alert | Fires when | Response |
+|---|---|---|
+| `ServiceDown` | A service's metrics endpoint is unreachable for 2 minutes | Check `docker compose ps` and the service logs |
+| `HighHttpErrorRate` | More than 5% of requests return 5xx for 5 minutes | Check logs in Grafana/Loki by `requestId` |
+| `HighHttpLatency` | p95 latency is above 1 second for 10 minutes | Check dependency health and traces in Tempo |
+| `RefundsNeedAttention` | A refund exhausted its 10 automatic retries | Admin → Payments: read the error, then retry or resolve it in Stripe |
+| `StripeWebhookProcessingFailed` | A Stripe webhook event failed processing for 15 minutes | Fix the cause from the backend logs; Stripe retries for 3 days, after that resend the event from the Stripe dashboard |
+
+Send a test alert after every change to the alerting setup:
+
+```bash
+docker compose --env-file "$ENV_FILE" -f docker-compose.prod.yml exec alertmanager \
+  amtool alert add TestAlert severity=warning \
+  --annotation='summary="Test alert"' --alertmanager.url=http://localhost:9093
+```
+
+Rule changes are unit-tested in [ops/observability/alerts.test.yml](../ops/observability/alerts.test.yml) (`promtool test rules`), which CI runs.

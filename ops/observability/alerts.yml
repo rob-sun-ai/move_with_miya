@@ -1,0 +1,40 @@
+groups:
+  - name: move-with-miya
+    rules:
+      - alert: ServiceDown
+        expr: up{job=~"backend|user-service|classes-service|registration-service"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: '{{ $labels.job }} metrics endpoint is unavailable'
+      - alert: HighHttpErrorRate
+        expr: sum(rate(move_with_miya_http_requests_total{status_code=~"5.."}[5m])) / clamp_min(sum(rate(move_with_miya_http_requests_total[5m])), 1) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'HTTP 5xx rate is above 5%'
+      - alert: HighHttpLatency
+        expr: histogram_quantile(0.95, sum(rate(move_with_miya_http_request_duration_seconds_bucket[5m])) by (le)) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: '95th percentile HTTP latency is above one second'
+      - alert: RefundsNeedAttention
+        expr: move_with_miya_refunds_needing_attention > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: '{{ $value }} refund(s) exhausted automatic retries'
+          description: 'Open the admin Payments tab, read the refund error, then retry the refund or resolve it in the Stripe dashboard.'
+      - alert: StripeWebhookProcessingFailed
+        expr: move_with_miya_stripe_webhook_events_failed > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $value }} Stripe webhook event(s) failed processing'
+          description: 'Stripe retries failed deliveries for up to three days. Check backend logs for the event; after fixing the cause, resend it from the Stripe dashboard if retries have stopped.'

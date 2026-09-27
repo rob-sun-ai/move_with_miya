@@ -1,0 +1,29 @@
+# Unit tests for alerts.yml: `promtool test rules alerts.test.yml`
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'move_with_miya_refunds_needing_attention{job="registration-service"}'
+        values: '0 1 1 1 1 1 1 1'
+      - series: 'move_with_miya_stripe_webhook_events_failed{job="registration-service"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RefundsNeedAttention
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: RefundsNeedAttention
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: registration-service
+            exp_annotations:
+              summary: '1 refund(s) exhausted automatic retries'
+              description: 'Open the admin Payments tab, read the refund error, then retry the refund or resolve it in the Stripe dashboard.'
+      - eval_time: 20m
+        alertname: StripeWebhookProcessingFailed
+        exp_alerts: []

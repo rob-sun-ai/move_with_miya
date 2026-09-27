@@ -189,6 +189,7 @@ The production stack requires:
 - `PUBLIC_HOST`, `TLS_CERT_FILE`, and `TLS_KEY_FILE` (inside `TLS_CERT_DIR`, default `/etc/letsencrypt`)
 - `RELEASE_VERSION` (the image tag, e.g. the git SHA)
 - `GRAFANA_ADMIN_PASSWORD`
+- `ALERT_EMAIL_TO` (alerts are sent through Resend using `RESEND_API_KEY` and `RESEND_FROM_EMAIL`)
 
 Production checklist:
 
@@ -200,3 +201,4 @@ Production checklist:
 - [ ] Set checkout rate limits appropriate to the deployment and confirm Redis is reachable before accepting payments.
 - [ ] Verify `POSTGRES_PASSWORD` and `RABBITMQ_PASS` are unique, strong, URL-safe credentials (they are embedded in connection URLs) before exposing the stack publicly.
 - [ ] Confirm the admin Observability tab is available and non-admin requests receive `403`.
+- [ ] Send a test alert (see the runbook) and confirm it arrives at `ALERT_EMAIL_TO`.

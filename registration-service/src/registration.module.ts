@@ -6,6 +6,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { OutboxPublisher } from './outbox.publisher';
 import { HealthController } from './health.controller';
 import { HealthService } from './health.service';
+import { PaymentMetrics } from './payment-metrics';
 
 @Module({
   imports: [
@@ -23,6 +24,11 @@ import { HealthService } from './health.service';
     ]),
   ],
   controllers: [RegistrationController, HealthController],
-  providers: [RegistrationService, OutboxPublisher, HealthService],
+  providers: [
+    RegistrationService,
+    OutboxPublisher,
+    HealthService,
+    PaymentMetrics,
+  ],
 })
 export class RegistrationModule {}

@@ -1,0 +1,23 @@
+# Rendered at container start: __ALERT_EMAIL_TO__ and __ALERT_EMAIL_FROM__ are
+# replaced from the environment (see the alertmanager service in
+# docker-compose.prod.yml). Mail goes out through Resend's SMTP relay using the
+# existing RESEND_API_KEY, mounted as a Compose secret.
+global:
+  smtp_smarthost: smtp.resend.com:587
+  smtp_from: '__ALERT_EMAIL_FROM__'
+  smtp_auth_username: resend
+  smtp_auth_password_file: /run/secrets/resend_api_key
+  smtp_require_tls: true
+
+route:
+  receiver: email
+  group_by: ['alertname', 'job']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: email
+    email_configs:
+      - to: '__ALERT_EMAIL_TO__'
+        send_resolved: true

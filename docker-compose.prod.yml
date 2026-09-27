@@ -337,6 +337,30 @@ services:
     volumes:
       - prometheus-data:/prometheus
       - ./ops/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro,z
+      - ./ops/observability/alerts.yml:/etc/prometheus/alerts.yml:ro,z
+    logging: *logging
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    restart: unless-stopped
+    # Alertmanager cannot read the environment, so render the recipients into
+    # its config before starting it.
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - >-
+        awk '{ gsub(/__ALERT_EMAIL_TO__/, ENVIRON["ALERT_EMAIL_TO"]);
+        gsub(/__ALERT_EMAIL_FROM__/, ENVIRON["ALERT_EMAIL_FROM"]); print }'
+        /etc/alertmanager/alertmanager.yml.tmpl > /tmp/alertmanager.yml &&
+        exec /bin/alertmanager --config.file=/tmp/alertmanager.yml
+        --storage.path=/alertmanager
+    environment:
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:?ALERT_EMAIL_TO is required}
+      ALERT_EMAIL_FROM: ${RESEND_FROM_EMAIL:?RESEND_FROM_EMAIL is required}
+    secrets:
+      - resend_api_key
+    volumes:
+      - ./ops/observability/alertmanager.yml.tmpl:/etc/alertmanager/alertmanager.yml.tmpl:ro,z
+      - alertmanager-data:/alertmanager
     logging: *logging
 
   loki:
@@ -390,6 +414,11 @@ volumes:
   postgres-data:
   prometheus-data:
   grafana-data:
+  alertmanager-data:
   loki-data:
   tempo-data:
   promtail-data:
+
+secrets:
+  resend_api_key:
+    environment: RESEND_API_KEY
