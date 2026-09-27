@@ -164,6 +164,10 @@ jobs:
             -v /tmp/fullchain.pem:/etc/nginx/tls/fullchain.pem:ro \
             -v /tmp/privkey.pem:/etc/nginx/tls/privkey.pem:ro \
             nginx:alpine nginx -t
+      - name: Check Compose invariants
+        run: python3 ops/check-compose.py
+      - name: Exercise nginx routing
+        run: ./nginx/test-routing.sh
       - name: Build production images
         run: |
           docker build -f backend/Dockerfile.prod backend

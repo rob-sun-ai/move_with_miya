@@ -16,3 +16,5 @@ The populated environment file must live outside the repository with restrictive
 `docker-compose.prod.yml` builds images tagged `move-with-miya/<service>:${RELEASE_VERSION}`. Each service's Prisma migrations run as a one-shot `*-migrate` job, and the service only starts after its job completes successfully. Every service exposes `/health/live` and `/health/ready`; Compose healthchecks use the readiness endpoint, and nginx only starts once the services behind it are healthy.
 
 nginx terminates TLS, redirects HTTP to HTTPS, and blocks the internal `/metrics` endpoints. It resolves upstream addresses at startup, so reload it (`nginx -s reload`) after recreating application containers.
+
+CI enforces these rules: `ops/check-compose.py` checks the Compose invariants (only nginx publishes ports, images are tagged by release, services restart and wait for their migrations), and `nginx/test-routing.sh` runs the real nginx config and checks redirects, blocked endpoints, proxied routes, HSTS, and the body-size limit. Both run locally with Docker.
