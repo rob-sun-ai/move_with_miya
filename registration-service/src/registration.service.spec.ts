@@ -1,6 +1,9 @@
 import { Test } from '@nestjs/testing';
 import { RpcException } from '@nestjs/microservices';
-import { RegistrationService } from './registration.service';
+import {
+  MAX_REFUND_ATTEMPTS,
+  RegistrationService,
+} from './registration.service';
 
 jest.mock('./prisma/prisma.service', () => ({
   PrismaService: jest.fn().mockImplementation(() => ({ client: {} })),
@@ -448,6 +451,88 @@ describe('RegistrationService', () => {
       }),
     ).resolves.toEqual({ payment, registration: null, needsRefund: false });
     expect(prisma.payment.update).not.toHaveBeenCalled();
+  });
+
+  describe('refund retry backoff', () => {
+    beforeEach(() => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-09-27T12:00:00.000Z'));
+    });
+    afterEach(() => jest.useRealTimers());
+
+    it('counts failed attempts and backs off exponentially', async () => {
+      prisma.payment.findUnique.mockResolvedValue({ refundAttempts: 2 });
+      prisma.payment.update.mockResolvedValue({});
+
+      await service.failPaymentRefund('payment-1', 'card_declined');
+
+      expect(prisma.payment.update).toHaveBeenCalledWith({
+        where: { id: 'payment-1' },
+        data: {
+          refundStatus: 'Failed',
+          refundError: 'card_declined',
+          refundAttempts: 3,
+          refundAvailableAt: new Date('2026-09-27T12:08:00.000Z'),
+        },
+      });
+    });
+
+    it('only lists refunds that are due and still under the attempt cap', async () => {
+      prisma.payment.findMany.mockResolvedValue([]);
+
+      await service.listRefundPendingPayments();
+
+      expect(prisma.payment.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            refundStatus: { in: ['Pending', 'Failed'] },
+            refundAvailableAt: { lte: new Date('2026-09-27T12:00:00.000Z') },
+            refundAttempts: { lt: MAX_REFUND_ATTEMPTS },
+          },
+        }),
+      );
+    });
+
+    it('flags refunds whose retries are exhausted', async () => {
+      prisma.payment.findMany.mockResolvedValue([
+        {
+          id: 'a',
+          refundStatus: 'Failed',
+          refundAttempts: MAX_REFUND_ATTEMPTS,
+        },
+        { id: 'b', refundStatus: 'Failed', refundAttempts: 1 },
+      ]);
+
+      await expect(service.getAllPayments()).resolves.toEqual([
+        expect.objectContaining({ id: 'a', refundNeedsAttention: true }),
+        expect.objectContaining({ id: 'b', refundNeedsAttention: false }),
+      ]);
+    });
+
+    it('gives a new refund request a fresh attempt budget', async () => {
+      prisma.payment.findUnique.mockResolvedValue({
+        id: 'payment-1',
+        status: 'Paid',
+        amountCents: 2500,
+        refundStatus: 'Failed',
+        refundPercentage: 100,
+        refundAttempts: MAX_REFUND_ATTEMPTS,
+      });
+      prisma.payment.update.mockResolvedValue({});
+
+      await service.beginPaymentRefund({
+        paymentId: 'payment-1',
+        percentage: 100,
+      });
+
+      expect(prisma.payment.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            refundAttempts: 0,
+            refundAvailableAt: new Date('2026-09-27T12:00:00.000Z'),
+          }) as never,
+        }),
+      );
+    });
   });
 
   it('requires the exact expected amount before completing a refund', async () => {

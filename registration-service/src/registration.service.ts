@@ -87,6 +87,20 @@ function isRefundInFlight(refundStatus: string) {
   return refundStatus === 'Pending' || refundStatus === 'Failed';
 }
 
+/** Automatic refund retries stop after this many failures. */
+export const MAX_REFUND_ATTEMPTS = 10;
+
+/** Failed refunds the retry sweep has given up on; an admin must act. */
+export const REFUND_NEEDS_ATTENTION_WHERE = {
+  refundStatus: 'Failed' as const,
+  refundAttempts: { gte: MAX_REFUND_ATTEMPTS },
+};
+
+/** Exponential backoff between refund retries: 2, 4, … 256 minutes. */
+function refundRetryDelayMs(attempts: number) {
+  return 2 ** Math.min(attempts, 8) * 60_000;
+}
+
 /** Payment fields that request a refund of `percentage` of the amount paid. */
 function refundRequest(amountCents: number, percentage: number) {
   const refundAmountCents = Math.floor((amountCents * percentage) / 100);
@@ -97,6 +111,9 @@ function refundRequest(amountCents: number, percentage: number) {
     refundStatus:
       refundAmountCents > 0 ? ('Pending' as const) : ('NotEligible' as const),
     refundError: null,
+    // A new request is retried immediately with a fresh attempt budget.
+    refundAttempts: 0,
+    refundAvailableAt: new Date(),
   };
 }
 
@@ -688,6 +705,9 @@ export class RegistrationService {
           // applies.
           refundStatus: 'Pending',
           refundError: null,
+          // Stripe is still processing it; the refund webhook normally
+          // completes it first, so only re-check occasionally.
+          refundAvailableAt: new Date(Date.now() + 60 * 60_000),
         },
       });
     });
@@ -703,11 +723,16 @@ export class RegistrationService {
       // A late or duplicate failure report must not undo a finished refund,
       // nor mark one that was never requested.
       if (!isRefundInFlight(payment.refundStatus)) return payment;
+      const refundAttempts = payment.refundAttempts + 1;
       return tx.payment.update({
         where: { id: paymentId },
         data: {
           refundStatus: 'Failed',
           refundError: errorMessage(error) ?? 'Refund failed',
+          refundAttempts,
+          refundAvailableAt: new Date(
+            Date.now() + refundRetryDelayMs(refundAttempts),
+          ),
         },
       });
     });
@@ -715,17 +740,27 @@ export class RegistrationService {
 
   listRefundPendingPayments() {
     return this.prisma.client.payment.findMany({
-      where: { refundStatus: { in: ['Pending', 'Failed'] } },
-      orderBy: { updatedAt: 'asc' },
+      where: {
+        refundStatus: { in: ['Pending', 'Failed'] },
+        refundAvailableAt: { lte: new Date() },
+        refundAttempts: { lt: MAX_REFUND_ATTEMPTS },
+      },
+      orderBy: { refundAvailableAt: 'asc' },
       take: 100,
     });
   }
 
-  getAllPayments() {
-    return this.prisma.client.payment.findMany({
+  async getAllPayments() {
+    const payments = await this.prisma.client.payment.findMany({
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: 500,
     });
+    return payments.map((payment) => ({
+      ...payment,
+      refundNeedsAttention:
+        payment.refundStatus === REFUND_NEEDS_ATTENTION_WHERE.refundStatus &&
+        payment.refundAttempts >= MAX_REFUND_ATTEMPTS,
+    }));
   }
 
   async recordStripeWebhookEvent(data: {
