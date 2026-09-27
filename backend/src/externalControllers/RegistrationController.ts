@@ -62,14 +62,20 @@ export class RegistrationController {
     @Optional() private readonly stripeService?: StripeService,
   ) {}
 
-  private refundPercentageForMemberCancellation(cls: {
-    startDate?: string;
-    cancellationCutoffHours?: number;
-    refundPolicy?: Array<{ hoursBeforeStart: number; percentage: number }>;
-  }) {
-    if (!cls.startDate) return undefined;
+  /**
+   * Refund percentage owed to a member cancelling now: the tier with the
+   * largest threshold that is still ahead of the class start. Undefined once
+   * the cancellation cutoff has passed.
+   */
+  private refundPercentageForMemberCancellation(
+    startDate: string,
+    cls: {
+      cancellationCutoffHours?: number;
+      refundPolicy?: Array<{ hoursBeforeStart: number; percentage: number }>;
+    },
+  ) {
     const cutoffHours = cls.cancellationCutoffHours ?? 24;
-    const startTime = new Date(cls.startDate).getTime();
+    const startTime = new Date(startDate).getTime();
     const cutoff = startTime - cutoffHours * 3_600_000;
     if (Date.now() >= cutoff) return undefined;
     const hoursUntilStart = (startTime - Date.now()) / 3_600_000;
@@ -331,7 +337,10 @@ export class RegistrationController {
         classStartAt: cls.startDate,
         cancellationCutoffHours: cls.cancellationCutoffHours ?? 24,
         source: 'member',
-        refundPercentage: this.refundPercentageForMemberCancellation(cls),
+        refundPercentage: this.refundPercentageForMemberCancellation(
+          cls.startDate,
+          cls,
+        ),
       },
     );
     if (result.refundPaymentId) {

@@ -427,42 +427,43 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleRefundEvent(object: Stripe.Refund | Stripe.Charge) {
-    const paymentIntent =
-      'payment_intent' in object ? object.payment_intent : null;
-    const paymentIntentId = this.getStripeObjectId(paymentIntent);
+    const paymentIntentId = this.getStripeObjectId(object.payment_intent);
     if (!paymentIntentId) return;
     const payment = await this.rpc<PaymentRecord | null>(
       'get_payment_by_payment_intent',
       { paymentIntentId },
     );
-    if (!payment) return;
-    if (
-      'status' in object &&
-      (object.status === 'failed' || object.status === 'canceled')
-    ) {
-      await this.rpc('fail_payment_refund', {
-        paymentId: payment.id,
-        error: `Stripe reported a ${object.status} refund`,
-      });
-      return;
+    // Stripe sends both refund.updated and charge.refunded for one refund.
+    if (!payment || payment.refundStatus === 'Succeeded') return;
+
+    let actualAmount: number;
+    let stripeRefundId: string | undefined;
+    if (object.object === 'refund') {
+      if (object.status === 'failed' || object.status === 'canceled') {
+        await this.rpc('fail_payment_refund', {
+          paymentId: payment.id,
+          error: `Stripe reported a ${object.status} refund`,
+        });
+        return;
+      }
+      if (object.status !== 'succeeded') return;
+      actualAmount = object.amount;
+      stripeRefundId = object.id;
+    } else {
+      // A charge only identifies itself, not the refund; keep the recorded
+      // refund id instead of overwriting it with the charge id.
+      if (!object.refunded) return;
+      actualAmount = object.amount_refunded;
     }
-    if ('status' in object && object.status !== 'succeeded') return;
-    if ('refunded' in object && !object.refunded) return;
+
     const expectedAmount = payment.refundAmountCents;
-    const actualAmount =
-      object.object === 'charge' ? object.amount_refunded : object.amount;
-    if (
-      !expectedAmount ||
-      !Number.isInteger(actualAmount) ||
-      actualAmount !== expectedAmount
-    ) {
+    if (!expectedAmount || actualAmount !== expectedAmount) {
       await this.rpc('fail_payment_refund', {
         paymentId: payment.id,
         error: 'Stripe refund amount did not match the requested amount',
       });
       return;
     }
-    const stripeRefundId = 'id' in object ? object.id : undefined;
     if (
       payment.stripeRefundId &&
       stripeRefundId &&

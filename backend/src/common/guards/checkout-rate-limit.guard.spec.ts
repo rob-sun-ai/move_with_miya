@@ -92,4 +92,97 @@ describe('CheckoutRateLimitGuard', () => {
     expect(consumeIp).toHaveBeenCalled();
     expect(consumeUser).not.toHaveBeenCalled();
   });
+
+  function serviceWith(overrides: Record<string, jest.Mock> = {}) {
+    return {
+      consumeIp: jest.fn().mockResolvedValue(decision),
+      consumeUser: jest.fn().mockResolvedValue(decision),
+      consumeRefundIp: jest.fn().mockResolvedValue(decision),
+      applyHeaders: jest.fn(),
+      ...overrides,
+    };
+  }
+
+  function guardFor(mocks: Record<string, jest.Mock>) {
+    return new CheckoutRateLimitGuard(
+      mocks as unknown as CheckoutRateLimitService,
+    );
+  }
+
+  it('uses the refund bucket for refund routes and reports both scopes', async () => {
+    const service = serviceWith();
+    const guard = guardFor(service);
+    const { context: executionContext, response } = context(
+      '/checkout/payments/p1/refund',
+    );
+
+    await expect(guard.canActivate(executionContext)).resolves.toBe(true);
+    expect(service.consumeRefundIp).toHaveBeenCalledWith(
+      '/checkout/payments/p1/refund',
+      '198.51.100.1',
+    );
+    expect(service.consumeIp).not.toHaveBeenCalled();
+    expect(service.applyHeaders).toHaveBeenCalledWith(response, decision, 'IP');
+    expect(service.applyHeaders).toHaveBeenCalledWith(
+      response,
+      decision,
+      'User',
+    );
+  });
+
+  it('blocks when the member bucket is exhausted', async () => {
+    const guard = guardFor(
+      serviceWith({
+        consumeUser: jest
+          .fn()
+          .mockResolvedValue({ ...decision, allowed: false }),
+      }),
+    );
+
+    await expect(guard.canActivate(context().context)).rejects.toMatchObject({
+      status: 429,
+    });
+  });
+
+  it('fails closed when Redis is unavailable', async () => {
+    const guard = guardFor(
+      serviceWith({
+        consumeIp: jest.fn().mockRejectedValue(new Error('Redis down')),
+      }),
+    );
+
+    await expect(guard.canActivate(context().context)).rejects.toThrow(
+      'Payment service is temporarily unavailable',
+    );
+  });
+
+  it.each([
+    [
+      'the socket address',
+      { ip: undefined, socket: { remoteAddress: '203.0.113.9' } },
+      '203.0.113.9',
+    ],
+    [
+      'unknown',
+      { ip: undefined, socket: { remoteAddress: undefined } },
+      'unknown',
+    ],
+  ])('falls back to %s for the client IP', async (_label, overrides, ip) => {
+    const service = serviceWith();
+    const guard = guardFor(service);
+    const executionContext = {
+      switchToHttp: () => ({
+        getRequest: () => ({
+          path: '',
+          session: {},
+          ...overrides,
+        }),
+        getResponse: () => ({ header: jest.fn() }),
+      }),
+    } as unknown as ExecutionContext;
+
+    await guard.canActivate(executionContext);
+
+    expect(service.consumeIp).toHaveBeenCalledWith('checkout', ip);
+  });
 });
