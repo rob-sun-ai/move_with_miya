@@ -228,6 +228,30 @@ describe('AdminDashboard', () => {
     );
   });
 
+  it('loads the admin-only observability summary', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          generatedAt: '2026-09-17T12:00:00.000Z',
+          version: 'test-release',
+          grafanaUrl: null,
+          services: {
+            backend: {
+              status: 'ok',
+              responseTimeMs: 2,
+              dependencies: { redis: 'ok' },
+            },
+          },
+        }),
+      ),
+    );
+    renderDashboard();
+    await user.click(screen.getByRole('tab', { name: 'Observability' }));
+    expect(await screen.findByText('backend')).toBeInTheDocument();
+    expect(screen.getByText('Healthy')).toBeInTheDocument();
+  });
+
   it('updates a user ban status and handles registration cancellation', async () => {
     const user = userEvent.setup();
     vi.spyOn(global, 'fetch').mockImplementation(() =>
