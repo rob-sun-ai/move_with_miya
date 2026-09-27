@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Test double for curl: records the URL (last argument) in $SHIM_DIR/curl.log
+# and fails for URLs containing $SHIM_FAIL_CURL.
+set -euo pipefail
+url=${*: -1}
+printf '%s\n' "$url" >> "$SHIM_DIR/curl.log"
+if [ -n "${SHIM_FAIL_CURL:-}" ]; then
+  case "$url" in *"$SHIM_FAIL_CURL"*) exit 22 ;; esac
+fi

@@ -8,8 +8,19 @@
 #                          statements from stdin to the $SHIM_DIR/db_* files
 #                          and logs them to $SHIM_DIR/sql.log
 #   alertmanager        -> appends the call to $SHIM_DIR/alerts.log (fails if SHIM_FAIL_ALERT=1)
+#   image inspect REF   -> succeeds only if REF is listed in $SHIM_IMAGES
+#   compose run JOB     -> fails if SHIM_FAIL_RUN=JOB
+# The RELEASE_VERSION seen by each call goes to $SHIM_DIR/release.log.
 set -euo pipefail
 printf '%s\n' "$*" >> "$SHIM_DIR/docker.log"
+printf '%s\n' "${RELEASE_VERSION:-}" >> "$SHIM_DIR/release.log"
+
+if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then
+  case " ${SHIM_IMAGES:-} " in *" $3 "*) exit 0 ;; *) exit 1 ;; esac
+fi
+case " $* " in
+  *" run --rm ${SHIM_FAIL_RUN:-none} "*) exit 1 ;;
+esac
 
 args=("$@")
 for index in "${!args[@]}"; do

@@ -100,4 +100,42 @@ test_app_databases_match_postgres_init() {
   assert_eq "$(. ./ops/lib.sh && echo "$APP_DATABASES")" "$expected"
 }
 
+test_assert_git_sha_accepts_full_hex_shas() {
+  (. ./ops/lib.sh && assert_git_sha V 0123456789abcdef0123456789abcdef01234567 \
+    && assert_git_sha V 0123456789ABCDEF0123456789ABCDEF01234567) \
+    || fail 'expected valid SHAs to pass'
+}
+
+test_assert_git_sha_rejects_anything_else() {
+  for value in '' abc 0123456789abcdef0123456789abcdef0123456 \
+    0123456789abcdef0123456789abcdef012345678 \
+    g123456789abcdef0123456789abcdef01234567 '0123456789abcdef0123456789abcdef0123456 '; do
+    output=$( (. ./ops/lib.sh && assert_git_sha ROLLBACK_VERSION "$value") 2>&1) \
+      && fail "accepted '$value'"
+    assert_contains "$output" 'ROLLBACK_VERSION must be a 40-character Git SHA'
+  done
+}
+
+test_persist_release_version_replaces_the_recorded_release() {
+  printf 'A=1\nRELEASE_VERSION=old\nB=2\n' > "$ENV_FILE"
+  (. ./ops/lib.sh && persist_release_version abc)
+  assert_eq "$(cat "$ENV_FILE")" 'A=1
+RELEASE_VERSION=abc
+B=2'
+}
+
+test_persist_release_version_adds_a_missing_release() {
+  printf 'A=1\n' > "$ENV_FILE"
+  (. ./ops/lib.sh && persist_release_version abc)
+  assert_eq "$(cat "$ENV_FILE")" 'A=1
+RELEASE_VERSION=abc'
+}
+
+test_reload_nginx_starts_then_reloads_it() {
+  (. ./ops/lib.sh && reload_nginx)
+  prefix="compose --env-file $ENV_FILE -f docker-compose.prod.yml"
+  assert_eq "$(cat "$SHIM_DIR/docker.log")" "$prefix up -d nginx
+$prefix exec -T nginx nginx -s reload"
+}
+
 run_tests
