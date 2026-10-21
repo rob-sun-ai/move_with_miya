@@ -116,12 +116,17 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  /** Stripe expects lowercase ISO codes; accept USD as well as usd. */
+  private currency(): string {
+    return this.config.get<string>('STRIPE_CURRENCY', 'usd').toLowerCase();
+  }
+
   onModuleInit() {
     // Presence, placeholder, and HTTPS checks for the Stripe settings run in
     // assertProductionConfig at bootstrap.
-    const currency = this.config.get<string>('STRIPE_CURRENCY', 'usd');
+    const currency = this.currency();
     if (!/^[a-z]{3}$/.test(currency)) {
-      throw new Error('STRIPE_CURRENCY must be a three-letter lowercase code');
+      throw new Error('STRIPE_CURRENCY must be a three-letter currency code');
     }
     if (UNSUPPORTED_CURRENCIES.has(currency)) {
       throw new Error('STRIPE_CURRENCY must use two decimal places');
@@ -213,9 +218,7 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
         'Free classes use the free registration flow',
       );
     }
-    const currency = this.config
-      .get<string>('STRIPE_CURRENCY', 'usd')
-      .toLowerCase();
+    const currency = this.currency();
     if (!/^[a-z]{3}$/.test(currency) || UNSUPPORTED_CURRENCIES.has(currency)) {
       throw new ServiceUnavailableException(
         'Payment currency is not supported',

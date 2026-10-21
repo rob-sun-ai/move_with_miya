@@ -184,12 +184,18 @@ describe('StripeService lifecycle', () => {
     });
 
     // Presence, placeholder, and HTTPS checks live in assertProductionConfig.
-    it.each(['USD', 'us', 'usdx', ''])(
+    it('accepts an uppercase currency code', () => {
+      const { service } = setup({ STRIPE_CURRENCY: 'USD' });
+      expect(() => service.onModuleInit()).not.toThrow();
+      service.onModuleDestroy();
+    });
+
+    it.each(['us', 'usdx', 'us1', ''])(
       'rejects currency %p in every environment',
       (currency) => {
         const { service } = setup({ STRIPE_CURRENCY: currency });
         expect(() => service.onModuleInit()).toThrow(
-          'STRIPE_CURRENCY must be a three-letter lowercase code',
+          'STRIPE_CURRENCY must be a three-letter currency code',
         );
       },
     );
@@ -353,8 +359,8 @@ describe('StripeService lifecycle', () => {
       ).rejects.toThrow('Class price is invalid');
     });
 
-    it('charges numeric prices in the configured currency', async () => {
-      const ctx = setup({ STRIPE_CURRENCY: 'eur' });
+    it('charges numeric prices and normalizes the currency', async () => {
+      const ctx = setup({ STRIPE_CURRENCY: 'EUR' });
       ctx.classes.send.mockReturnValue(of({ ...openClass, cost: 20 }));
       withPendingPayment(ctx);
 
