@@ -95,6 +95,15 @@ for upstream in ('backend', 'frontend', 'user-service'):
         f'nginx waits for a healthy {upstream}',
     )
 
+for name, service in services.items():
+    logging = service.get('logging', {})
+    check(
+        logging.get('driver') == 'json-file'
+        and 'com.docker.compose.service'
+        in logging.get('options', {}).get('labels', ''),
+        f'{name} logs record its Compose service name for Promtail',
+    )
+
 if os.path.exists('ops/observability/prometheus.yml'):
     with open('ops/observability/prometheus.yml', encoding='utf-8') as file:
         prometheus = file.read()
