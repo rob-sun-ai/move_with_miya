@@ -19,6 +19,36 @@ import { fetchActiveUser } from '../common/user-verification';
 // Stripe rejects Checkout sessions that expire less than 30 minutes after
 // creation; keep a margin for the RPC round-trips before the create call.
 const CHECKOUT_SESSION_TTL_MS = 35 * 60 * 1000;
+// A reused hold needs this much time left for Stripe to accept its expiry.
+const MIN_CHECKOUT_SESSION_TTL_MS = 31 * 60 * 1000;
+
+// Prices are charged in hundredths of the currency unit, so currencies whose
+// smallest unit is not 1/100 would be charged the wrong amount.
+// https://docs.stripe.com/currencies#special-cases
+const UNSUPPORTED_CURRENCIES = new Set([
+  'bhd',
+  'bif',
+  'clp',
+  'djf',
+  'gnf',
+  'isk',
+  'jod',
+  'jpy',
+  'kmf',
+  'krw',
+  'kwd',
+  'mga',
+  'omr',
+  'pyg',
+  'rwf',
+  'tnd',
+  'ugx',
+  'vnd',
+  'vuv',
+  'xaf',
+  'xof',
+  'xpf',
+]);
 
 interface ClassRecord {
   id: number;
@@ -46,6 +76,7 @@ interface PaymentRecord {
   stripeCheckoutSessionId?: string | null;
   stripePaymentIntentId?: string | null;
   stripeRefundId?: string | null;
+  expiresAt?: string | null;
 }
 
 @Injectable()
@@ -88,6 +119,8 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
         throw new Error(
           'STRIPE_CURRENCY must be a three-letter lowercase code',
         );
+      if (UNSUPPORTED_CURRENCIES.has(currency))
+        throw new Error('STRIPE_CURRENCY must use two decimal places');
     }
     this.retryTimer = setInterval(() => void this.retryRefunds(), 60_000);
   }
@@ -186,6 +219,11 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
     const currency = this.config
       .get<string>('STRIPE_CURRENCY', 'usd')
       .toLowerCase();
+    if (!/^[a-z]{3}$/.test(currency) || UNSUPPORTED_CURRENCIES.has(currency)) {
+      throw new ServiceUnavailableException(
+        'Payment currency is not supported',
+      );
+    }
     const expiresAt = new Date(Date.now() + CHECKOUT_SESSION_TTL_MS);
     let payment = await this.rpc<PaymentRecord>(
       'create_or_get_pending_payment',
@@ -242,6 +280,28 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
       });
     }
 
+    // A reused hold without a session (a concurrent request is creating one,
+    // or an earlier request died) keeps its original expiry. Stripe needs at
+    // least 30 minutes, so start over when too little is left.
+    if (
+      this.holdExpiry(payment, expiresAt).getTime() - Date.now() <
+      MIN_CHECKOUT_SESSION_TTL_MS
+    ) {
+      await this.rpc('mark_payment_expired', { id: payment.id });
+      payment = await this.rpc<PaymentRecord>('create_or_get_pending_payment', {
+        userId,
+        classId,
+        capacity: cls.capacity,
+        amountCents,
+        currency,
+        expiresAt: expiresAt.toISOString(),
+      });
+    }
+
+    // The session expires with its hold. Deriving it from the stored hold
+    // also keeps the parameters identical for concurrent requests that share
+    // the idempotency key.
+    const sessionExpiresAt = this.holdExpiry(payment, expiresAt);
     const idempotencyKey = `checkout:${userId}:${classId}:${payment.id}`;
     let session: Stripe.Checkout.Session | undefined;
     try {
@@ -269,7 +329,7 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
           ],
           success_url: `${this.appUrl()}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
           cancel_url: `${this.appUrl()}/checkout/cancel?class_id=${classId}`,
-          expires_at: Math.floor(expiresAt.getTime() / 1000),
+          expires_at: Math.floor(sessionExpiresAt.getTime() / 1000),
         },
         { idempotencyKey },
       );
@@ -287,6 +347,11 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
           .expire(session.id)
           .catch(() => undefined);
       }
+      if (await this.checkoutStartedElsewhere(payment.id, session, error)) {
+        throw new ConflictException(
+          'Checkout is already starting for this class; please try again',
+        );
+      }
       await this.rpc('mark_payment_failed', {
         id: payment.id,
         error:
@@ -294,6 +359,38 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
       }).catch(() => undefined);
       throw new ServiceUnavailableException('Unable to start Stripe Checkout');
     }
+  }
+
+  private holdExpiry(payment: PaymentRecord, fallback: Date) {
+    const stored = payment.expiresAt ? new Date(payment.expiresAt) : fallback;
+    return Number.isNaN(stored.getTime()) ? fallback : stored;
+  }
+
+  /**
+   * True when a concurrent request for the same payment owns its Checkout
+   * session. Failing the payment then would refund the customer who pays
+   * through that session instead of registering them.
+   */
+  private async checkoutStartedElsewhere(
+    paymentId: string,
+    session: Stripe.Checkout.Session | undefined,
+    error: unknown,
+  ) {
+    const stripeError = (error ?? {}) as { type?: string; statusCode?: number };
+    if (
+      !session &&
+      (stripeError.type === 'StripeIdempotencyError' ||
+        stripeError.statusCode === 409)
+    ) {
+      return true;
+    }
+    const current = await this.rpc<PaymentRecord | null>('get_payment_by_id', {
+      id: paymentId,
+    }).catch(() => null);
+    return (
+      !!current?.stripeCheckoutSessionId &&
+      current.stripeCheckoutSessionId !== session?.id
+    );
   }
 
   async statusForUser(sessionId: string, userId: string) {
@@ -333,35 +430,18 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
       ) {
         await this.handleCheckoutSuccess(event.data.object);
       } else if (event.type === 'checkout.session.async_payment_failed') {
-        const session = event.data.object;
-        const paymentId =
-          session.metadata?.paymentId ?? session.client_reference_id;
+        const paymentId = this.sessionPaymentId(event.data.object);
         if (paymentId) await this.rpc('mark_payment_failed', { id: paymentId });
       } else if (event.type === 'checkout.session.expired') {
-        const session = event.data.object;
-        const paymentId =
-          session.metadata?.paymentId ?? session.client_reference_id;
+        const paymentId = this.sessionPaymentId(event.data.object);
         if (paymentId)
           await this.rpc('mark_payment_expired', { id: paymentId });
       } else if (
         event.type === 'refund.updated' ||
+        event.type === 'refund.failed' ||
         event.type === 'charge.refunded'
       ) {
         await this.handleRefundEvent(event.data.object);
-      } else if (event.type === 'refund.failed') {
-        const refund = event.data.object;
-        const paymentIntentId = this.getStripeObjectId(refund.payment_intent);
-        const payment = paymentIntentId
-          ? await this.rpc<PaymentRecord | null>(
-              'get_payment_by_payment_intent',
-              { paymentIntentId },
-            )
-          : null;
-        if (payment)
-          await this.rpc('fail_payment_refund', {
-            paymentId: payment.id,
-            error: 'Stripe reported a failed refund',
-          });
       }
       await this.rpc('complete_stripe_webhook_event', {
         stripeEventId: event.id,
@@ -376,21 +456,31 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * The payment a Checkout Session was created for. Sessions this app did
+   * not create (other integrations on the same Stripe account) are logged
+   * and acknowledged, so Stripe does not retry them for days.
+   */
+  private sessionPaymentId(session: Stripe.Checkout.Session) {
+    const paymentId = session.metadata?.paymentId;
+    if (!paymentId) {
+      this.logger.warn(
+        `Ignoring Checkout session ${session.id} without a payment id`,
+      );
+    }
+    return paymentId;
+  }
+
   private async handleCheckoutSuccess(session: Stripe.Checkout.Session) {
     if (session.payment_status !== 'paid') return;
+    const paymentId = this.sessionPaymentId(session);
+    if (!paymentId) return;
     const metadata = session.metadata ?? {};
-    const paymentId = metadata.paymentId ?? session.client_reference_id;
     const classId = Number(metadata.classId);
     const userId = metadata.userId;
     const amountCents = session.amount_total;
     const currency = session.currency?.toLowerCase();
-    if (
-      !paymentId ||
-      !userId ||
-      !Number.isInteger(classId) ||
-      !amountCents ||
-      !currency
-    ) {
+    if (!userId || !Number.isInteger(classId) || !amountCents || !currency) {
       throw new ConflictException('Stripe Checkout metadata is invalid');
     }
     const payment = await this.rpc<PaymentRecord | null>('get_payment_by_id', {
@@ -439,6 +529,16 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
     let actualAmount: number;
     let stripeRefundId: string | undefined;
     if (object.object === 'refund') {
+      if (object.metadata?.paymentId !== payment.id) {
+        if (object.status === 'succeeded') {
+          await this.reconcileExternalRefund(payment, object.amount, object.id);
+        }
+        return;
+      }
+      // An earlier attempt that failed and has since been replaced.
+      if (payment.stripeRefundId && payment.stripeRefundId !== object.id) {
+        return;
+      }
       if (object.status === 'failed' || object.status === 'canceled') {
         await this.rpc('fail_payment_refund', {
           paymentId: payment.id,
@@ -453,6 +553,13 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
       // A charge only identifies itself, not the refund; keep the recorded
       // refund id instead of overwriting it with the charge id.
       if (!object.refunded) return;
+      if (
+        payment.refundStatus === 'None' ||
+        payment.refundStatus === 'NotEligible'
+      ) {
+        await this.reconcileExternalRefund(payment, object.amount_refunded);
+        return;
+      }
       actualAmount = object.amount_refunded;
     }
 
@@ -464,21 +571,42 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
       });
       return;
     }
-    if (
-      payment.stripeRefundId &&
-      stripeRefundId &&
-      payment.stripeRefundId !== stripeRefundId
-    ) {
-      await this.rpc('fail_payment_refund', {
-        paymentId: payment.id,
-        error: 'Stripe refund identity did not match the requested refund',
-      });
-      return;
-    }
     await this.rpc('complete_payment_refund', {
       paymentId: payment.id,
       stripeRefundId,
       amountCents: expectedAmount,
+    });
+  }
+
+  /**
+   * Records a refund issued outside the app, such as from the Stripe
+   * Dashboard. Only a full refund of a payment with no refund of its own can
+   * be recorded; anything else is logged for an admin to reconcile.
+   */
+  private async reconcileExternalRefund(
+    payment: PaymentRecord,
+    amountCents: number,
+    stripeRefundId?: string,
+  ) {
+    if (
+      payment.status !== 'Paid' ||
+      (payment.refundStatus !== 'None' &&
+        payment.refundStatus !== 'NotEligible') ||
+      amountCents !== payment.amountCents
+    ) {
+      this.logger.warn(
+        `Payment ${payment.id.slice(0, 8)} was refunded outside the app; reconcile it manually`,
+      );
+      return;
+    }
+    await this.rpc('begin_payment_refund', {
+      paymentId: payment.id,
+      percentage: 100,
+    });
+    await this.rpc('complete_payment_refund', {
+      paymentId: payment.id,
+      stripeRefundId,
+      amountCents,
     });
   }
 
@@ -533,17 +661,24 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
       });
       throw new ConflictException('Stripe refund amount did not match');
     }
+    // Record the refund unless it already succeeded under the recorded id:
+    // completion must match the recorded refund, and a retry must find a
+    // failed refund to replace instead of creating it again.
+    if (
+      refund.status !== 'succeeded' ||
+      (payment.stripeRefundId && payment.stripeRefundId !== refund.id)
+    ) {
+      const recorded = await this.rpc('record_payment_refund', {
+        paymentId,
+        stripeRefundId: refund.id,
+      });
+      if (refund.status === 'pending') return recorded;
+    }
     if (refund.status === 'succeeded') {
       return this.rpc('complete_payment_refund', {
         paymentId,
         stripeRefundId: refund.id,
         amountCents: refundAmountCents,
-      });
-    }
-    if (refund.status === 'pending') {
-      return this.rpc('record_payment_refund', {
-        paymentId,
-        stripeRefundId: refund.id,
       });
     }
     await this.rpc('fail_payment_refund', {
@@ -556,14 +691,23 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
   /**
    * Reuses the refund already issued for this payment so retries can never
    * refund the customer twice, even after the idempotency key has expired.
+   * A refund that failed at Stripe is never retried by Stripe, so it is
+   * replaced by a new one.
    */
   private async findOrCreateRefund(
     payment: PaymentRecord,
     paymentIntentId: string,
     amountCents: number,
   ): Promise<Stripe.Refund> {
+    let replacedRefundId: string | undefined;
     if (payment.stripeRefundId) {
-      return this.stripe.refunds.retrieve(payment.stripeRefundId);
+      const recorded = await this.stripe.refunds.retrieve(
+        payment.stripeRefundId,
+      );
+      if (recorded.status !== 'failed' && recorded.status !== 'canceled') {
+        return recorded;
+      }
+      replacedRefundId = recorded.id;
     }
     const existing = await this.stripe.refunds.list({
       payment_intent: paymentIntentId,
@@ -583,7 +727,16 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
         reason: 'requested_by_customer',
         metadata: { paymentId: payment.id },
       },
-      { idempotencyKey: `refund:${payment.id}:${amountCents}` },
+      {
+        // Concurrent retries of one attempt share a key; a replacement for a
+        // failed refund gets its own, or Stripe would replay the failed one.
+        idempotencyKey: [
+          'refund',
+          payment.id,
+          amountCents,
+          ...(replacedRefundId ? [replacedRefundId] : []),
+        ].join(':'),
+      },
     );
   }
 

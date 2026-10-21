@@ -427,6 +427,7 @@ describe('StripeService', () => {
       status: 'succeeded',
       amount: 1400,
       payment_intent: 'pi_1',
+      metadata: { paymentId: 'payment-1' },
     } as unknown as Stripe.Refund);
 
     expect(registrationClient.send).toHaveBeenCalledWith(

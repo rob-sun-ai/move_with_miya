@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Logger,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -25,7 +26,8 @@ const openClass = {
 
 /** A fixed RPC reply, a function of the payload, or an RpcFailure. */
 type Reply = unknown;
-type ReplyFn = (payload: Record<string, unknown>) => unknown;
+type ReplyPayload = Record<string, unknown>;
+type ReplyFn = (payload: ReplyPayload) => unknown;
 
 /** Builds a StripeService wired to fake RPC clients and a fake Stripe SDK. */
 function setup(env: Record<string, string | undefined> = {}) {
@@ -194,6 +196,7 @@ describe('StripeService lifecycle', () => {
         'PUBLIC_APP_URL must be a valid HTTPS URL',
       ],
       [{ STRIPE_CURRENCY: 'USD' }, 'STRIPE_CURRENCY must be a three-letter'],
+      [{ STRIPE_CURRENCY: 'jpy' }, 'STRIPE_CURRENCY must use two decimal'],
     ])('rejects production configuration %o', (overrides, message) => {
       const { service } = setup({ ...production, ...overrides });
       expect(() => service.onModuleInit()).toThrow(message);
@@ -485,6 +488,7 @@ describe('StripeService lifecycle', () => {
       withPendingPayment(ctx);
       ctx.stripe.checkout.sessions.create.mockRejectedValue('rate limited');
       ctx.replies.mark_payment_failed = new RpcFailure({ statusCode: 500 });
+      ctx.replies.get_payment_by_id = new RpcFailure({ statusCode: 500 });
 
       await expect(
         ctx.service.createCheckoutSession('user-1', 1),
@@ -506,6 +510,165 @@ describe('StripeService lifecycle', () => {
       ).rejects.toThrow('Unable to start Stripe Checkout');
       expect(ctx.sent('mark_payment_failed')).toHaveLength(1);
     });
+
+    it('expires the session with the hold it reuses', async () => {
+      const ctx = setup();
+      const holdExpiresAt = new Date(NOW.getTime() + 34 * 60 * 1000);
+      withPendingPayment(ctx, { expiresAt: holdExpiresAt.toISOString() });
+
+      await ctx.service.createCheckoutSession('user-1', 1);
+
+      expect(ctx.sent('mark_payment_expired')).toEqual([]);
+      expect(ctx.stripe.checkout.sessions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          expires_at: holdExpiresAt.getTime() / 1000,
+        }),
+        { idempotencyKey: 'checkout:user-1:1:payment-1' },
+      );
+    });
+
+    it('starts a new hold when the reused one is too short for Stripe', async () => {
+      const ctx = setup();
+      let calls = 0;
+      ctx.replies.create_or_get_pending_payment = () =>
+        ++calls === 1
+          ? {
+              id: 'payment-1',
+              status: 'Pending',
+              expiresAt: new Date(NOW.getTime() + 10 * 60 * 1000),
+            }
+          : {
+              id: 'payment-2',
+              status: 'Pending',
+              expiresAt: new Date(NOW.getTime() + 35 * 60 * 1000),
+            };
+
+      await expect(
+        ctx.service.createCheckoutSession('user-1', 1),
+      ).resolves.toEqual({
+        url: 'https://checkout.test/new',
+        paymentId: 'payment-2',
+      });
+      expect(ctx.sent('mark_payment_expired')).toEqual([{ id: 'payment-1' }]);
+      expect(ctx.stripe.checkout.sessions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          expires_at: (NOW.getTime() + 35 * 60 * 1000) / 1000,
+        }),
+        { idempotencyKey: 'checkout:user-1:1:payment-2' },
+      );
+    });
+
+    it('leaves the payment to a concurrent request that is creating its session', async () => {
+      const ctx = setup();
+      const holdExpiresAt = new Date(NOW.getTime() + 35 * 60 * 1000);
+      withPendingPayment(ctx, { expiresAt: holdExpiresAt.toISOString() });
+      jest
+        .spyOn(global, 'fetch')
+        .mockImplementation(() =>
+          Promise.resolve(new Response(JSON.stringify({ banned: false }))),
+        );
+      let finishFirst: (session: unknown) => void = () => undefined;
+      ctx.stripe.checkout.sessions.create
+        .mockImplementationOnce(
+          () => new Promise((resolve) => (finishFirst = resolve)),
+        )
+        .mockRejectedValueOnce({
+          type: 'StripeIdempotencyError',
+          statusCode: 400,
+          message: 'Keys for idempotent requests can only be used once',
+        });
+
+      const first = ctx.service.createCheckoutSession('user-1', 1);
+      await jest.advanceTimersByTimeAsync(2000);
+      const second = ctx.service.createCheckoutSession('user-1', 1);
+
+      await expect(second).rejects.toEqual(
+        new ConflictException(
+          'Checkout is already starting for this class; please try again',
+        ),
+      );
+      finishFirst({ id: 'cs_new', url: 'https://checkout.test/new' });
+      await expect(first).resolves.toEqual({
+        url: 'https://checkout.test/new',
+        paymentId: 'payment-1',
+      });
+
+      // Both requests sent identical parameters under the shared key.
+      const [[firstParams, firstKey], [secondParams, secondKey]] = ctx.stripe
+        .checkout.sessions.create.mock.calls as [unknown, unknown][];
+      expect(secondParams).toEqual(firstParams);
+      expect(secondKey).toEqual(firstKey);
+      expect(ctx.sent('mark_payment_failed')).toEqual([]);
+      expect(ctx.stripe.checkout.sessions.expire).not.toHaveBeenCalled();
+      expect(ctx.sent('attach_checkout_session')).toEqual([
+        { paymentId: 'payment-1', stripeCheckoutSessionId: 'cs_new' },
+      ]);
+    });
+
+    it('does not fail a payment Stripe reports a conflicting request for', async () => {
+      const ctx = setup();
+      withPendingPayment(ctx);
+      ctx.stripe.checkout.sessions.create.mockRejectedValue({
+        statusCode: 409,
+      });
+
+      await expect(
+        ctx.service.createCheckoutSession('user-1', 1),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(ctx.sent('mark_payment_failed')).toEqual([]);
+    });
+
+    it('does not fail a payment that another request attached a session to', async () => {
+      const ctx = setup();
+      withPendingPayment(ctx);
+      ctx.replies.attach_checkout_session = new RpcFailure({
+        statusCode: 409,
+        message: 'Payment already has a Checkout session',
+      });
+      ctx.replies.get_payment_by_id = {
+        id: 'payment-1',
+        status: 'Pending',
+        stripeCheckoutSessionId: 'cs_other',
+      };
+
+      await expect(
+        ctx.service.createCheckoutSession('user-1', 1),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(ctx.stripe.checkout.sessions.expire).toHaveBeenCalledWith(
+        'cs_new',
+      );
+      expect(ctx.sent('mark_payment_failed')).toEqual([]);
+    });
+
+    it('fails the payment when only its own session was attached', async () => {
+      const ctx = setup();
+      withPendingPayment(ctx);
+      ctx.replies.attach_checkout_session = new RpcFailure({ statusCode: 500 });
+      ctx.replies.get_payment_by_id = {
+        id: 'payment-1',
+        stripeCheckoutSessionId: 'cs_new',
+      };
+
+      await expect(
+        ctx.service.createCheckoutSession('user-1', 1),
+      ).rejects.toThrow('Unable to start Stripe Checkout');
+      expect(ctx.sent('mark_payment_failed')).toHaveLength(1);
+    });
+
+    it.each(['jpy', 'kwd', 'US'])(
+      'refuses to charge in currency %p',
+      async (currency) => {
+        const ctx = setup({ STRIPE_CURRENCY: currency });
+        withPendingPayment(ctx);
+
+        await expect(
+          ctx.service.createCheckoutSession('user-1', 1),
+        ).rejects.toEqual(
+          new ServiceUnavailableException('Payment currency is not supported'),
+        );
+        expect(ctx.sent('create_or_get_pending_payment')).toEqual([]);
+      },
+    );
 
     it.each([
       [undefined, 'Payment URL is not configured'],
@@ -612,18 +775,38 @@ describe('StripeService lifecycle', () => {
       await ctx.service.handleWebhook(
         checkoutEvent(type, { metadata: { paymentId: 'payment-1' } }),
       );
-      await ctx.service.handleWebhook(
-        checkoutEvent(type, {
-          metadata: null,
-          client_reference_id: 'payment-2',
-        }),
-      );
-      await ctx.service.handleWebhook(
-        checkoutEvent(type, { metadata: {}, client_reference_id: null }),
-      );
 
-      expect(ctx.sent(cmd)).toEqual([{ id: 'payment-1' }, { id: 'payment-2' }]);
+      expect(ctx.sent(cmd)).toEqual([{ id: 'payment-1' }]);
     });
+
+    it.each([
+      'checkout.session.completed',
+      'checkout.session.async_payment_failed',
+      'checkout.session.expired',
+    ])(
+      'acknowledges %s for a session this app did not create',
+      async (type) => {
+        const ctx = claimed(setup());
+        const warn = jest
+          .spyOn(Logger.prototype, 'warn')
+          .mockImplementation(() => undefined);
+
+        for (const session of [
+          { id: 'cs_other', metadata: null, client_reference_id: 'order-1' },
+          { id: 'cs_other', metadata: {}, payment_status: 'paid' },
+        ]) {
+          await ctx.service.handleWebhook(checkoutEvent(type, session));
+        }
+
+        expect(ctx.sent('get_payment_by_id')).toEqual([]);
+        expect(ctx.sent('mark_payment_failed')).toEqual([]);
+        expect(ctx.sent('mark_payment_expired')).toEqual([]);
+        expect(ctx.sent('complete_stripe_webhook_event')).toHaveLength(2);
+        expect(warn).toHaveBeenCalledWith(
+          'Ignoring Checkout session cs_other without a payment id',
+        );
+      },
+    );
 
     it.each([
       ['a PaymentIntent id', 'pi_1'],
@@ -633,7 +816,13 @@ describe('StripeService lifecycle', () => {
       ctx.replies.get_payment_by_payment_intent = { id: 'payment-1' };
 
       await ctx.service.handleWebhook(
-        checkoutEvent('refund.failed', { payment_intent: pi }),
+        checkoutEvent('refund.failed', {
+          object: 'refund',
+          id: 're_1',
+          status: 'failed',
+          payment_intent: pi,
+          metadata: { paymentId: 'payment-1' },
+        }),
       );
 
       expect(ctx.sent('get_payment_by_payment_intent')).toEqual([
@@ -663,8 +852,7 @@ describe('StripeService lifecycle', () => {
       const ctx = claimed(setup());
       const event = checkoutEvent('checkout.session.completed', {
         ...paidSession,
-        metadata: {},
-        client_reference_id: null,
+        metadata: { paymentId: 'payment-1' },
       });
 
       await expect(ctx.service.handleWebhook(event)).rejects.toThrow(
@@ -762,14 +950,12 @@ describe('StripeService lifecycle', () => {
         expect(ctx.sent('get_payment_by_id')).toEqual([]);
       });
 
-      it('falls back to the client reference id and an expanded PaymentIntent', async () => {
+      it('accepts an expanded PaymentIntent', async () => {
         const ctx = fulfillment(setup());
 
         await ctx.service.handleWebhook(
           checkoutEvent('checkout.session.completed', {
             ...paidSession,
-            metadata: { classId: '1', userId: 'user-1' },
-            client_reference_id: 'payment-1',
             payment_intent: { id: 'pi_1' },
           }),
         );
@@ -792,7 +978,6 @@ describe('StripeService lifecycle', () => {
             },
           },
         ],
-        ['no metadata', { metadata: null, client_reference_id: 'payment-1' }],
         ['no amount', { amount_total: null }],
         ['no currency', { currency: null }],
       ])('rejects a session with %s', async (_label, overrides) => {
@@ -891,6 +1076,9 @@ describe('StripeService lifecycle', () => {
         return checkoutEvent(type, {
           object: type === 'refund.updated' ? 'refund' : 'charge',
           payment_intent: 'pi_1',
+          ...(type === 'refund.updated'
+            ? { metadata: { paymentId: 'payment-1' } }
+            : {}),
           ...object,
         });
       }
@@ -1025,23 +1213,109 @@ describe('StripeService lifecycle', () => {
         ]);
       });
 
-      it('fails a refund that is not the one recorded for the payment', async () => {
-        const ctx = withPayment(pendingRefund);
+      it.each(['succeeded', 'failed'])(
+        'ignores a %s earlier attempt that a new refund replaced',
+        async (status) => {
+          const ctx = withPayment(pendingRefund);
 
-        await ctx.service.handleWebhook(
-          refundEvent('refund.updated', {
-            id: 're_2',
-            status: 'succeeded',
-            amount: 1550,
-          }),
+          await ctx.service.handleWebhook(
+            refundEvent('refund.updated', { id: 're_0', status, amount: 1550 }),
+          );
+
+          expect(ctx.sent('fail_payment_refund')).toEqual([]);
+          expect(ctx.sent('complete_payment_refund')).toEqual([]);
+        },
+      );
+
+      describe('refunds issued outside the app', () => {
+        const unrefunded = { ...paidPayment, amountCents: 1550 };
+
+        it.each([
+          [
+            'a refund',
+            refundEvent('refund.updated', {
+              id: 're_dash',
+              status: 'succeeded',
+              amount: 1550,
+              metadata: {},
+            }),
+            're_dash',
+          ],
+          [
+            'a charge',
+            refundEvent('charge.refunded', {
+              id: 'ch_1',
+              refunded: true,
+              amount_refunded: 1550,
+            }),
+            undefined,
+          ],
+        ])(
+          'records a full refund reported by %s',
+          async (_label, event, id) => {
+            const ctx = withPayment(unrefunded);
+
+            await ctx.service.handleWebhook(event);
+
+            expect(ctx.sent('begin_payment_refund')).toEqual([
+              { paymentId: 'payment-1', percentage: 100 },
+            ]);
+            expect(ctx.sent('complete_payment_refund')).toEqual([
+              { paymentId: 'payment-1', stripeRefundId: id, amountCents: 1550 },
+            ]);
+            expect(ctx.sent('fail_payment_refund')).toEqual([]);
+          },
         );
 
-        expect(ctx.sent('fail_payment_refund')).toEqual([
-          {
-            paymentId: 'payment-1',
-            error: 'Stripe refund identity did not match the requested refund',
+        it.each([
+          ['a partial refund', unrefunded, 500],
+          ['a refund while one of its own is pending', pendingRefund, 1550],
+          [
+            'a refund of an unpaid payment',
+            { ...unrefunded, status: 'Expired' },
+            1550,
+          ],
+        ])(
+          'logs %s for manual reconciliation',
+          async (_label, payment, amount) => {
+            const ctx = withPayment(payment);
+            const warn = jest
+              .spyOn(Logger.prototype, 'warn')
+              .mockImplementation(() => undefined);
+
+            await ctx.service.handleWebhook(
+              refundEvent('refund.updated', {
+                id: 're_dash',
+                status: 'succeeded',
+                amount,
+                metadata: {},
+              }),
+            );
+
+            expect(warn).toHaveBeenCalledWith(
+              'Payment payment- was refunded outside the app; reconcile it manually',
+            );
+            expect(ctx.sent('begin_payment_refund')).toEqual([]);
+            expect(ctx.sent('complete_payment_refund')).toEqual([]);
+            expect(ctx.sent('fail_payment_refund')).toEqual([]);
           },
-        ]);
+        );
+
+        it('waits for a refund from outside the app to succeed', async () => {
+          const ctx = withPayment(unrefunded);
+
+          await ctx.service.handleWebhook(
+            refundEvent('refund.updated', {
+              id: 're_dash',
+              status: 'pending',
+              amount: 1550,
+              metadata: null,
+            }),
+          );
+
+          expect(ctx.sent('begin_payment_refund')).toEqual([]);
+          expect(ctx.sent('fail_payment_refund')).toEqual([]);
+        });
       });
 
       it('ignores refunds without a PaymentIntent or a known payment', async () => {
@@ -1059,6 +1333,39 @@ describe('StripeService lifecycle', () => {
       });
     });
   });
+
+  /**
+   * Answers the refund RPCs from one mutable payment row, like the
+   * registration service would.
+   */
+  function claimedLedger(ctx: ReturnType<typeof setup>) {
+    const state: Record<string, unknown> = { ...paidPayment };
+    ctx.replies.record_stripe_webhook_event = { claimed: true };
+    ctx.replies.get_payment_by_id = () => ({ ...state });
+    ctx.replies.get_payment_by_payment_intent = () => ({ ...state });
+    ctx.replies.begin_payment_refund = () =>
+      Object.assign(state, {
+        refundStatus: 'Pending',
+        refundPercentage: 100,
+        refundAmountCents: 1550,
+      });
+    ctx.replies.record_payment_refund = ({ stripeRefundId }: ReplyPayload) =>
+      Object.assign(state, { stripeRefundId });
+    ctx.replies.fail_payment_refund = () =>
+      Object.assign(state, { refundStatus: 'Failed' });
+    ctx.replies.complete_payment_refund = ({
+      stripeRefundId,
+    }: ReplyPayload) => {
+      if (state.stripeRefundId && state.stripeRefundId !== stripeRefundId) {
+        return new RpcFailure({ statusCode: 409 });
+      }
+      return Object.assign(state, {
+        status: 'Refunded',
+        refundStatus: 'Succeeded',
+      });
+    };
+    return { ...ctx, state };
+  }
 
   describe('refundPayment', () => {
     const pending = {
@@ -1255,8 +1562,103 @@ describe('StripeService lifecycle', () => {
       await expect(ctx.service.refundPayment('payment-1')).rejects.toEqual(
         new ServiceUnavailableException('Stripe refund did not succeed'),
       );
+      expect(ctx.sent('record_payment_refund')).toEqual([
+        { paymentId: 'payment-1', stripeRefundId: 're_1' },
+      ]);
       expect(ctx.sent('fail_payment_refund')).toEqual([
         { paymentId: 'payment-1', error: 'Stripe refund status: failed' },
+      ]);
+    });
+
+    it('issues a new refund after a pending one fails at Stripe', async () => {
+      const ctx = claimedLedger(setup());
+      ctx.stripe.refunds.create.mockResolvedValueOnce({
+        id: 're_1',
+        amount: 1550,
+        status: 'pending',
+      });
+
+      // 1. The refund is accepted but still processing.
+      await ctx.service.refundPayment('payment-1');
+      expect(ctx.state).toMatchObject({
+        refundStatus: 'Pending',
+        stripeRefundId: 're_1',
+      });
+
+      // 2. Stripe later reports that it failed.
+      await ctx.service.handleWebhook(
+        checkoutEvent('refund.failed', {
+          object: 'refund',
+          id: 're_1',
+          status: 'failed',
+          amount: 1550,
+          payment_intent: 'pi_1',
+          metadata: { paymentId: 'payment-1' },
+        }),
+      );
+      expect(ctx.state.refundStatus).toBe('Failed');
+
+      // 3. The retry replaces it instead of re-reading the failed refund.
+      ctx.stripe.refunds.retrieve.mockResolvedValue({
+        id: 're_1',
+        amount: 1550,
+        status: 'failed',
+      });
+      ctx.stripe.refunds.list.mockResolvedValue({
+        data: [
+          {
+            id: 're_1',
+            status: 'failed',
+            metadata: { paymentId: 'payment-1' },
+          },
+        ],
+      });
+      ctx.stripe.refunds.create.mockResolvedValueOnce({
+        id: 're_2',
+        amount: 1550,
+        status: 'succeeded',
+      });
+      await ctx.service.refundPayment('payment-1');
+
+      expect(ctx.stripe.refunds.create).toHaveBeenLastCalledWith(
+        expect.objectContaining({ payment_intent: 'pi_1', amount: 1550 }),
+        { idempotencyKey: 'refund:payment-1:1550:re_1' },
+      );
+      expect(ctx.state).toMatchObject({
+        status: 'Refunded',
+        refundStatus: 'Succeeded',
+        stripeRefundId: 're_2',
+      });
+    });
+
+    it('reuses a replacement already issued for a failed refund', async () => {
+      const ctx = setup();
+      ctx.replies.get_payment_by_id = {
+        ...pending,
+        refundStatus: 'Failed',
+        stripeRefundId: 're_1',
+      };
+      ctx.stripe.refunds.retrieve.mockResolvedValue({
+        id: 're_1',
+        amount: 1550,
+        status: 'canceled',
+      });
+      ctx.stripe.refunds.list.mockResolvedValue({
+        data: [
+          {
+            id: 're_2',
+            amount: 1550,
+            status: 'pending',
+            metadata: { paymentId: 'payment-1' },
+          },
+        ],
+      });
+
+      await ctx.service.refundPayment('payment-1');
+
+      expect(ctx.stripe.refunds.create).not.toHaveBeenCalled();
+      expect(ctx.sent('record_payment_refund')).toEqual([
+        { paymentId: 'payment-1', stripeRefundId: 're_2' },
       ]);
     });
   });
