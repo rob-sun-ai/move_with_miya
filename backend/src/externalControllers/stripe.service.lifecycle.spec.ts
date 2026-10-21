@@ -1079,6 +1079,45 @@ describe('StripeService lifecycle', () => {
         ]);
         expect(ctx.sent('complete_payment_refund')).toHaveLength(1);
       });
+
+      it.each([
+        ['a failed full refund', 'Failed', 100, 1550],
+        ['a pending partial refund', 'Pending', 50, 775],
+      ])(
+        'retries %s on a redelivered webhook without restarting it',
+        async (_label, refundStatus, refundPercentage, refundAmountCents) => {
+          const ctx = fulfillment(setup());
+          const requested = {
+            ...paidPayment,
+            refundStatus,
+            refundPercentage,
+            refundAmountCents,
+          };
+          ctx.replies.get_payment_by_id = requested;
+          ctx.replies.finalize_paid_registration = {
+            payment: requested,
+            needsRefund: true,
+          };
+          ctx.stripe.refunds.create.mockResolvedValue({
+            id: 're_1',
+            amount: refundAmountCents,
+            status: 'succeeded',
+          });
+
+          await ctx.service.handleWebhook(
+            checkoutEvent('checkout.session.completed', paidSession),
+          );
+
+          expect(ctx.sent('begin_payment_refund')).toEqual([]);
+          expect(ctx.sent('complete_payment_refund')).toEqual([
+            {
+              paymentId: 'payment-1',
+              stripeRefundId: 're_1',
+              amountCents: refundAmountCents,
+            },
+          ]);
+        },
+      );
     });
 
     describe('refund events', () => {

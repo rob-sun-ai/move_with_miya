@@ -520,7 +520,10 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
       classStatus: cls.status,
       classEndAt: cls.endDate,
     });
-    if (result.needsRefund) await this.refundPayment(result.payment.id, 100);
+    // finalize_paid_registration has already requested the refund. Retrying
+    // it as is keeps a redelivered webhook from restarting the refund's
+    // attempt budget (or clashing with a partial refund already requested).
+    if (result.needsRefund) await this.refundPayment(result.payment.id);
   }
 
   private async handleRefundEvent(object: Stripe.Refund | Stripe.Charge) {
