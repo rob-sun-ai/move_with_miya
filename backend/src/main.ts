@@ -32,6 +32,9 @@ async function bootstrap() {
       bodyParser: false,
     },
   );
+  // First, so CORS preflights and body-parser or session failures are still
+  // counted, logged, and tagged with a request ID.
+  app.use(requestTelemetry('backend'));
   const configService = app.get(ConfigService);
   const nodeEnv = configService.get<string>('NODE_ENV');
   const corsOrigin = configService.get<string>('CORS_ORIGIN');
@@ -96,8 +99,6 @@ async function bootstrap() {
   );
 
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
-
-  app.use(requestTelemetry('backend'));
 
   const port = configService.get<number>('PORT', 3002);
   await app.startAllMicroservices();

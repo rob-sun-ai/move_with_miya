@@ -18,6 +18,9 @@ import { assertProductionConfig } from './config-validation';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // First, so CORS preflights and body-parser or session failures are still
+  // counted, logged, and tagged with a request ID.
+  app.use(requestTelemetry('user-service'));
   const configService = app.get(ConfigService);
   const nodeEnv = configService.get<string>('NODE_ENV');
   const sessionSecret = configService.get<string>('SESSION_SECRET');
@@ -76,8 +79,6 @@ async function bootstrap() {
       transform: true,
     }),
   );
-
-  app.use(requestTelemetry('user-service'));
 
   const port = configService.get<number>('PORT', 3003);
   await app.listen(port);
