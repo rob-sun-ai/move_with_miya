@@ -53,7 +53,9 @@ check 'HTTP redirects to HTTPS on the public host' \
   "308 https://$host/classes?x=1" \
   "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' \
     -H "Host: $host" "http://127.0.0.1:$http_port/classes?x=1")"
-for path in /metrics /api/metrics /api/metrics/ /api//metrics '/api/%6Detrics'; do
+# Express matches routes case-insensitively, so case variants must be blocked too.
+for path in /metrics /api/metrics /api/metrics/ /api//metrics '/api/%6Detrics' \
+  /api/METRICS /api/Metrics /api/MeTrIcS/ '/api/%4Detrics'; do
   check "$path is blocked" 404 "$(status "$path")"
 done
 for path in /health/live /health/ready /api/classes /api/auth/google /api/users/me /classes; do
