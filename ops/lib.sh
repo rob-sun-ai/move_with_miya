@@ -8,7 +8,8 @@ APP_DATABASES='miya_users miya_classes miya_registrations'
 
 # Exports the KEY=VALUE lines of $ENV_FILE the way Docker Compose reads them:
 # values may contain spaces and <>, one pair of surrounding quotes is
-# removed, and nothing in the file is executed.
+# removed, a ` #` after an unquoted value (or after the closing quote) starts
+# a comment, and nothing in the file is executed.
 load_env() {
   ENV_FILE=${ENV_FILE:-.env.production}
   [ -f "$ENV_FILE" ] || { echo "Missing deployment env file: $ENV_FILE" >&2; exit 1; }
@@ -26,10 +27,31 @@ load_env() {
         ;;
     esac
     value=${line#*=}
+    quoted=
     case "$value" in
-      \"*\") value=${value#\"}; value=${value%\"} ;;
-      \'*\') value=${value#\'}; value=${value%\'} ;;
+      \"*\"* | \'*\'*)
+        quote=${value%"${value#?}"}
+        rest=${value#?}
+        # The value ends at the last quote, or at the first one when a
+        # comment containing a quote follows it. Only spaces or a ` #`
+        # comment may follow the closing quote.
+        for after in "${rest##*"$quote"}" "${rest#*"$quote"}"; do
+          trimmed=${after#"${after%%[![:space:]]*}"}
+          case "$trimmed" in
+            '') quoted=yes ;;
+            '#'*) [ "$trimmed" = "$after" ] || quoted=yes ;;
+          esac
+          if [ -n "$quoted" ]; then
+            value=${rest%"$quote$after"}
+            break
+          fi
+        done
+        ;;
     esac
+    if [ -z "$quoted" ]; then
+      value=${value%%[[:space:]]'#'*}
+      value=${value%"${value##*[![:space:]]}"}
+    fi
     export "$key=$value"
   done < "$ENV_FILE"
 }

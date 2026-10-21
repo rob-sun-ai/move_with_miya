@@ -25,6 +25,21 @@ ENV
   assert_eq "$output" 'Move with Miya <hello@studio.test>|quoted value|single quoted|a=b=c||  padded  '
 }
 
+test_load_env_strips_inline_comments_like_docker_compose() {
+  cat > "$ENV_FILE" <<'ENV'
+PLAIN=value # comment
+TAB=value	# comment
+HASH_INSIDE=a#b
+TRAILING=value   
+DOUBLE="kept # inside quotes" # comment
+SINGLE='single' # it's a comment
+ONLY_COMMENT= # nothing here
+ENV
+  output=$(. ./ops/lib.sh && load_env && sh -c \
+    'printf "%s|%s|%s|%s|%s|%s|%s" "$PLAIN" "$TAB" "$HASH_INSIDE" "$TRAILING" "$DOUBLE" "$SINGLE" "$ONLY_COMMENT"')
+  assert_eq "$output" 'value|value|a#b|value|kept # inside quotes|single|'
+}
+
 test_load_env_never_executes_the_file() {
   # shellcheck disable=SC2016
   printf 'INJECTED=$(touch %s/pwned)\nTICKS=`touch %s/pwned`\n' "$SANDBOX" "$SANDBOX" > "$ENV_FILE"
