@@ -312,18 +312,10 @@ services:
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-14d}'
+      - '--storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-10GB}'
     volumes:
       - prometheus-data:/prometheus
       - ./ops/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro,z
-    depends_on:
-      backend:
-        condition: service_healthy
-      user-service:
-        condition: service_healthy
-      classes-service:
-        condition: service_healthy
-      registration-service:
-        condition: service_healthy
 
   loki:
     image: grafana/loki:3.5.0

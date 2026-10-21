@@ -49,7 +49,7 @@ certbot's packaged timer runs `certbot renew` twice a day using the stored webro
 
 Prometheus, Grafana, Loki (with Promtail), Tempo, and the OpenTelemetry Collector run on the same Compose host. Their ports are internal-only; reach Grafana through an SSH tunnel or a separately protected proxy (`GRAFANA_PUBLIC_URL` adds a link to it in the admin area). The admin area exposes a controlled health summary at `/admin/observability`.
 
-- Metrics: Prometheus scrapes each service's `/metrics` every 15 seconds and keeps `PROMETHEUS_RETENTION` (default 14 days).
+- Metrics: Prometheus scrapes each service's `/metrics` every 15 seconds and keeps `PROMETHEUS_RETENTION` (default 14 days), capped at `PROMETHEUS_RETENTION_SIZE` (default 10GB) because it shares the host's disk. Prometheus starts independently of the applications, so it keeps recording while one of them is unhealthy.
 - Logs: Promtail ships container logs to Loki, which keeps 14 days.
 - Traces: services export OTLP traces to the collector, which forwards them to Tempo.
 
