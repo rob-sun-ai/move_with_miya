@@ -1506,6 +1506,23 @@ describe('StripeService lifecycle', () => {
       await expect(ctx.service.refundPayment('payment-1')).rejects.toEqual(
         new ConflictException('Payment cannot be refunded yet'),
       );
+      expect(ctx.sent('fail_payment_refund')).toEqual([
+        { paymentId: 'payment-1', error: 'Payment cannot be refunded yet' },
+      ]);
+      expect(ctx.stripe.refunds.create).not.toHaveBeenCalled();
+    });
+
+    it('still reports a payment that cannot be refunded when recording fails', async () => {
+      const ctx = setup();
+      ctx.replies.get_payment_by_id = {
+        ...pending,
+        stripePaymentIntentId: null,
+      };
+      ctx.replies.fail_payment_refund = new RpcFailure({ statusCode: 500 });
+
+      await expect(ctx.service.refundPayment('payment-1')).rejects.toEqual(
+        new ConflictException('Payment cannot be refunded yet'),
+      );
     });
 
     it('re-checks the refund already recorded for the payment', async () => {

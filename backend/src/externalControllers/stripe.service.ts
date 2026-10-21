@@ -645,6 +645,12 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
       return payment;
     }
     if (!payment.stripePaymentIntentId || !payment.refundAmountCents) {
+      // Record the failure so the sweep backs off instead of retrying the
+      // payment every interval at the front of its queue.
+      await this.rpc('fail_payment_refund', {
+        paymentId,
+        error: 'Payment cannot be refunded yet',
+      }).catch(() => undefined);
       throw new ConflictException('Payment cannot be refunded yet');
     }
     const refundAmountCents = payment.refundAmountCents;
