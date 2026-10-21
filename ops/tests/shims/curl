@@ -4,6 +4,7 @@
 set -euo pipefail
 url=${*: -1}
 printf '%s\n' "$url" >> "$SHIM_DIR/curl.log"
+printf '%s\n' "$*" >> "$SHIM_DIR/curl-args.log"
 if [ -n "${SHIM_FAIL_CURL:-}" ]; then
   case "$url" in *"$SHIM_FAIL_CURL"*) exit 22 ;; esac
 fi

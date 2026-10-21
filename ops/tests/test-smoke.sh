@@ -11,6 +11,12 @@ https://studio.test/classes"
   assert_contains "$output" 'Unauthenticated production smoke checks passed.'
 }
 
+test_retries_while_services_warm_up() {
+  ./ops/smoke-test.sh https://studio.test >/dev/null 2>&1 || fail 'smoke failed'
+  assert_eq "$(grep -c -- '--retry 5' "$SHIM_DIR/curl-args.log")" 3
+  assert_contains "$(cat "$SHIM_DIR/curl-args.log")" '--retry-connrefused'
+}
+
 test_fails_when_a_check_fails() {
   export SHIM_FAIL_CURL=/health/ready
   ./ops/smoke-test.sh https://studio.test >/dev/null 2>&1 && fail 'expected failure'

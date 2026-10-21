@@ -8,9 +8,15 @@ case "$base_url" in
   *) echo 'Smoke tests require an HTTPS base URL' >&2; exit 1 ;;
 esac
 
-curl --fail --silent --show-error "$base_url/health/live" >/dev/null
-curl --fail --silent --show-error "$base_url/health/ready" >/dev/null
-curl --fail --silent --show-error "$base_url/classes" >/dev/null
+# Retries cover services that are still warming up after a restart
+# (connection refused, timeouts, and 5xx responses).
+check() {
+  curl --fail --silent --show-error --max-time 10 \
+    --retry 5 --retry-delay 3 --retry-connrefused "$1" >/dev/null
+}
+check "$base_url/health/live"
+check "$base_url/health/ready"
+check "$base_url/classes"
 
 echo 'Unauthenticated production smoke checks passed.'
 echo 'Run the authenticated checklist in docs/production-runbook.md before declaring a release complete.'
