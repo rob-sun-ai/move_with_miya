@@ -33,7 +33,13 @@ async function renderPage() {
 
 async function nextPoll() {
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersToNextTimerAsync();
+  });
+}
+
+async function advance(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
   });
 }
 
@@ -129,37 +135,127 @@ describe('CheckoutSuccessPage', () => {
     await nextPoll();
 
     expect(
-      screen.getByText(
-        'This payment was refunded because the registration could not be completed.',
-      ),
+      screen.getByText('This payment has been refunded.'),
     ).toBeInTheDocument();
     expect(apiMock).toHaveBeenCalledTimes(1);
   });
 
-  it('gives up after 15 checks and points to the dashboard', async () => {
+  it.each(['Pending', 'Failed', 'NotEligible'])(
+    'stops when a paid checkout has no seat and a %s refund',
+    async (refundStatus) => {
+      apiMock.mockResolvedValue(status({ status: 'Paid', refundStatus }));
+
+      await renderPage();
+      await nextPoll();
+
+      expect(
+        screen.getByRole('heading', {
+          name: 'Payment confirmation incomplete',
+        }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          "We couldn't reserve a seat; your payment is being refunded.",
+        ),
+      ).toBeInTheDocument();
+      expect(apiMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('keeps polling a refunded payment that still holds a seat', async () => {
+    apiMock
+      .mockResolvedValueOnce(
+        status(
+          { status: 'Paid', refundStatus: 'Pending' },
+          { status: 'Waitlisted' },
+        ),
+      )
+      .mockResolvedValue(status({ status: 'Paid' }, { status: 'Registered' }));
+
+    await renderPage();
+    await nextPoll();
+
+    expect(
+      screen.getByRole('heading', { name: 'Registration confirmed' }),
+    ).toBeInTheDocument();
+    expect(apiMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('backs off between checks', async () => {
+    apiMock.mockResolvedValue(status({ status: 'Paid' }));
+
+    await renderPage();
+    const expectedDelays = [2000, 4000, 8000, 16_000, 30_000, 30_000, 30_000];
+    for (const [index, delay] of expectedDelays.entries()) {
+      await advance(delay - 1);
+      expect(apiMock).toHaveBeenCalledTimes(index + 1);
+      await advance(1);
+      expect(apiMock).toHaveBeenCalledTimes(index + 2);
+    }
+  });
+
+  it('gives up after 8 checks and points to the dashboard', async () => {
     apiMock.mockResolvedValue(status({ status: 'Paid' }));
 
     await renderPage();
     for (let i = 0; i < 20; i += 1) await nextPoll();
 
-    expect(apiMock).toHaveBeenCalledTimes(15);
+    expect(apiMock).toHaveBeenCalledTimes(8);
     expect(screen.getByText(/taking longer than expected/)).toBeInTheDocument();
     expect(
       screen.getByRole('link', { name: 'Go to your dashboard' }),
     ).toHaveAttribute('href', '/dashboard');
   });
 
-  it('shows a status error and recovers when a later check succeeds', async () => {
+  it('treats rate limiting as still confirming and keeps polling', async () => {
+    const tooMany = Object.assign(new Error('Too many payment requests'), {
+      status: 429,
+    });
     apiMock
-      .mockRejectedValueOnce(new Error('Too many payment requests'))
+      .mockRejectedValueOnce(tooMany)
+      .mockRejectedValueOnce(tooMany)
       .mockResolvedValue(status({ status: 'Paid' }, { status: 'Registered' }));
 
     await renderPage();
-    expect(screen.getByText('Too many payment requests')).toBeInTheDocument();
+    expect(screen.queryByText('Too many payment requests')).toBeNull();
+    expect(
+      screen.getByRole('heading', { name: 'Confirming your payment' }),
+    ).toBeInTheDocument();
+
+    await nextPoll();
+    expect(screen.queryByText('Too many payment requests')).toBeNull();
+    await nextPoll();
+
+    expect(
+      screen.getByRole('heading', { name: 'Registration confirmed' }),
+    ).toBeInTheDocument();
+    expect(apiMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('shows a timeout, not an error, when every check is rate limited', async () => {
+    apiMock.mockRejectedValue(
+      Object.assign(new Error('Too many payment requests'), { status: 429 }),
+    );
+
+    await renderPage();
+    for (let i = 0; i < 20; i += 1) await nextPoll();
+
+    expect(apiMock).toHaveBeenCalledTimes(8);
+    expect(screen.queryByText('Too many payment requests')).toBeNull();
+    expect(screen.getByText(/taking longer than expected/)).toBeInTheDocument();
+  });
+
+  it('shows a status error and recovers when a later check succeeds', async () => {
+    apiMock
+      .mockRejectedValueOnce(new Error('Payment service unavailable'))
+      .mockResolvedValue(status({ status: 'Paid' }, { status: 'Registered' }));
+
+    await renderPage();
+    expect(screen.getByText('Payment service unavailable')).toBeInTheDocument();
 
     await nextPoll();
 
-    expect(screen.queryByText('Too many payment requests')).toBeNull();
+    expect(screen.queryByText('Payment service unavailable')).toBeNull();
     expect(
       screen.getByRole('heading', { name: 'Registration confirmed' }),
     ).toBeInTheDocument();
