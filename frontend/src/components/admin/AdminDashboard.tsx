@@ -75,6 +75,16 @@ const emptyClassForm = {
   refundTiers: [{ hoursBeforeStart: '24', percentage: '100' }],
 };
 
+/** Whole, non-negative numbers only; rejects blank or partial number input. */
+const isWholeNumber = (value: string) => /^\d+$/.test(value.trim());
+
+const formatMoney = (cents: number, currency: string) =>
+  `${(cents / 100).toFixed(2)} ${currency.toUpperCase()}`;
+
+/** A refund that is already queued is retried as is, not re-requested. */
+const isRefundRetry = (payment: Payment) =>
+  payment.refundStatus === 'Pending' || payment.refundStatus === 'Failed';
+
 const emptyLocationForm = {
   name: '',
   address: '',
@@ -99,11 +109,13 @@ export default function AdminDashboard({
   const [registrations, setRegistrations] =
     useState<Registration[]>(initialRegistrations);
   const [payments, setPayments] = useState<Payment[]>(initialPayments);
+  const [refundingId, setRefundingId] = useState<string | null>(null);
 
   const [classDialog, setClassDialog] = useState(false);
   const [editingClass, setEditingClass] = useState<YogaClass | null>(null);
   const [classForm, setClassForm] = useState(emptyClassForm);
   const [classErrors, setClassErrors] = useState<Record<string, string>>({});
+  const [classSaveError, setClassSaveError] = useState<string | null>(null);
 
   const [locationDialog, setLocationDialog] = useState(false);
   const [editingLocation, setEditingLocation] = useState<Location | null>(null);
@@ -136,12 +148,22 @@ export default function AdminDashboard({
   };
 
   const handleRefund = async (payment: Payment) => {
+    if (refundingId) return;
+    // With no refund requested yet (or one ruled ineligible by the member
+    // cancellation policy) issue a full refund; otherwise retry as queued.
+    const fullRefund = !isRefundRetry(payment);
+    const amount = formatMoney(
+      fullRefund
+        ? payment.amountCents
+        : (payment.refundAmountCents ?? payment.amountCents),
+      payment.currency,
+    );
+    const question = fullRefund
+      ? `Refund ${amount} in full? The member's registration stays active.`
+      : `Retry the ${amount} refund?`;
+    if (!confirm(question)) return;
+    setRefundingId(payment.id);
     try {
-      // With no refund requested yet (or one ruled ineligible by the member
-      // cancellation policy) issue a full refund; otherwise retry as queued.
-      const fullRefund =
-        payment.refundStatus === 'None' ||
-        payment.refundStatus === 'NotEligible';
       await api(`/api/checkout/payments/${payment.id}/refund`, {
         method: 'POST',
         ...(fullRefund && { body: JSON.stringify({ percentage: 100 }) }),
@@ -150,6 +172,8 @@ export default function AdminDashboard({
       showNotice('Refund request processed.');
     } catch (err) {
       showError(err instanceof Error ? err.message : 'Refund failed.');
+    } finally {
+      setRefundingId(null);
     }
   };
 
@@ -160,6 +184,7 @@ export default function AdminDashboard({
   const openNewClass = () => {
     setEditingClass(null);
     setClassErrors({});
+    setClassSaveError(null);
     setClassForm({
       ...emptyClassForm,
       locationId: locations[0] ? String(locations[0].id) : '',
@@ -170,6 +195,7 @@ export default function AdminDashboard({
   const openEditClass = (cls: YogaClass) => {
     setEditingClass(cls);
     setClassErrors({});
+    setClassSaveError(null);
     setClassForm({
       name: cls.name,
       capacity: String(cls.capacity),
@@ -184,8 +210,14 @@ export default function AdminDashboard({
       status: cls.status,
       waitlistEnabled: cls.waitlistEnabled ?? true,
       cancellationCutoffHours: String(cls.cancellationCutoffHours ?? 24),
+      // Without a stored policy the backend refunds in full until the cutoff.
       refundTiers: (
-        cls.refundPolicy ?? [{ hoursBeforeStart: 24, percentage: 100 }]
+        cls.refundPolicy ?? [
+          {
+            hoursBeforeStart: cls.cancellationCutoffHours ?? 24,
+            percentage: 100,
+          },
+        ]
       ).map((tier) => ({
         hoursBeforeStart: String(tier.hoursBeforeStart),
         percentage: String(tier.percentage),
@@ -195,6 +227,7 @@ export default function AdminDashboard({
   };
 
   const saveClass = async () => {
+    setClassSaveError(null);
     try {
       const errors: Record<string, string> = {};
       if (!classForm.name.trim()) errors.name = 'Name is required.';
@@ -205,21 +238,35 @@ export default function AdminDashboard({
       if (classForm.cost === '' || Number.isNaN(Number(classForm.cost))) {
         errors.cost = 'Cost is required.';
       }
+      const cutoffValid = isWholeNumber(classForm.cancellationCutoffHours);
+      if (!cutoffValid) {
+        errors.cancellationCutoffHours =
+          'Cancellation cutoff must be a whole number of hours.';
+      }
+      const tierHours = classForm.refundTiers.map((tier) =>
+        Number(tier.hoursBeforeStart),
+      );
       if (
-        classForm.refundTiers.some((tier) => {
-          const hours = Number(tier.hoursBeforeStart);
-          const percentage = Number(tier.percentage);
-          return (
-            !Number.isInteger(hours) ||
-            hours < 0 ||
-            !Number.isInteger(percentage) ||
-            percentage < 0 ||
-            percentage > 100
-          );
-        })
+        classForm.refundTiers.some(
+          (tier) =>
+            !isWholeNumber(tier.hoursBeforeStart) ||
+            !isWholeNumber(tier.percentage) ||
+            Number(tier.percentage) > 100,
+        )
       ) {
         errors.refundPolicy =
           'Refund tiers must use whole hours and percentages from 0 to 100.';
+      } else if (new Set(tierHours).size !== tierHours.length) {
+        errors.refundPolicy =
+          'Each refund tier needs a different number of hours.';
+      } else if (
+        cutoffValid &&
+        !tierHours.some(
+          (hours) => hours <= Number(classForm.cancellationCutoffHours),
+        )
+      ) {
+        errors.refundPolicy =
+          'Add a refund tier at or below the cancellation cutoff.';
       }
       if (!classForm.duration || Number(classForm.duration) <= 0) {
         errors.duration = 'Duration must be greater than 0.';
@@ -289,7 +336,8 @@ export default function AdminDashboard({
       setClassDialog(false);
       showNotice(editingClass ? 'Class updated.' : 'Class created.');
     } catch (err) {
-      showError(err instanceof Error ? err.message : 'Save failed.');
+      // The dialog stays open, so show the error where the admin is looking.
+      setClassSaveError(err instanceof Error ? err.message : 'Save failed.');
     }
   };
 
@@ -757,6 +805,7 @@ export default function AdminDashboard({
             <TableHead>
               <TableRow>
                 <TableCell>Payment</TableCell>
+                <TableCell>Payer</TableCell>
                 <TableCell>Class</TableCell>
                 <TableCell>Amount</TableCell>
                 <TableCell>Status</TableCell>
@@ -769,25 +818,23 @@ export default function AdminDashboard({
                 <TableRow key={payment.id}>
                   <TableCell>{payment.id.slice(0, 8)}</TableCell>
                   <TableCell>
+                    {users.find((member) => member.id === payment.userId)
+                      ?.email ?? payment.userId}
+                  </TableCell>
+                  <TableCell>
                     {classes.find((cls) => cls.id === payment.classId)?.name ??
                       payment.classId}
                   </TableCell>
                   <TableCell>
-                    {(payment.amountCents / 100).toFixed(2)}{' '}
-                    {payment.currency.toUpperCase()}
+                    {formatMoney(payment.amountCents, payment.currency)}
                   </TableCell>
                   <TableCell>
                     <Chip label={payment.status} size="small" />
                   </TableCell>
                   <TableCell>
                     {payment.refundStatus}
-                    {payment.refundAmountCents != null && (
-                      <>
-                        {' '}
-                        ({(payment.refundAmountCents / 100).toFixed(2)}{' '}
-                        {payment.currency.toUpperCase()})
-                      </>
-                    )}
+                    {payment.refundAmountCents != null &&
+                      ` (${formatMoney(payment.refundAmountCents, payment.currency)})`}
                     {payment.refundNeedsAttention && (
                       <Chip
                         label={`Needs attention (${payment.refundAttempts ?? 0} attempts)`}
@@ -811,9 +858,10 @@ export default function AdminDashboard({
                       payment.refundStatus !== 'Succeeded' && (
                         <Button
                           size="small"
+                          disabled={refundingId === payment.id}
                           onClick={() => void handleRefund(payment)}
                         >
-                          Refund
+                          {isRefundRetry(payment) ? 'Retry refund' : 'Refund'}
                         </Button>
                       )}
                   </TableCell>
@@ -821,7 +869,7 @@ export default function AdminDashboard({
               ))}
               {payments.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={6} align="center">
+                  <TableCell colSpan={7} align="center">
                     No payments yet.
                   </TableCell>
                 </TableRow>
@@ -956,6 +1004,11 @@ export default function AdminDashboard({
       >
         <DialogTitle>{editingClass ? 'Edit Class' : 'New Class'}</DialogTitle>
         <DialogContent>
+          {classSaveError && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {classSaveError}
+            </Alert>
+          )}
           <Grid container spacing={2} sx={{ mt: 0 }}>
             <Grid size={12}>
               <TextField
@@ -1085,6 +1138,8 @@ export default function AdminDashboard({
                     cancellationCutoffHours: e.target.value,
                   })
                 }
+                error={Boolean(classErrors.cancellationCutoffHours)}
+                helperText={classErrors.cancellationCutoffHours}
               />
             </Grid>
             <Grid size={{ xs: 6 }}>

@@ -126,6 +126,10 @@ describe('AdminDashboard', () => {
       .mockImplementation(() =>
         Promise.resolve(new Response(JSON.stringify([payment]))),
       );
+    vi.stubGlobal(
+      'confirm',
+      vi.fn(() => true),
+    );
     renderDashboard({ initialPayments: [payment] });
     await user.click(screen.getByRole('tab', { name: 'Payments' }));
     await user.click(screen.getByRole('button', { name: 'Refund' }));
@@ -165,7 +169,9 @@ describe('AdminDashboard', () => {
     expect(
       screen.getByText('Needs attention (10 attempts)'),
     ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Refund' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Retry refund' }),
+    ).toBeInTheDocument();
   });
 
   it('marks contact submissions read and reports the result', async () => {

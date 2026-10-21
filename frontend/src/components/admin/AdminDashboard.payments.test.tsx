@@ -138,7 +138,90 @@ describe('AdminDashboard payments', () => {
     });
     await openPayments();
 
-    expect(screen.getAllByRole('button', { name: 'Refund' })).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: 'Refund' })).toHaveLength(1);
+    expect(
+      screen.getAllByRole('button', { name: 'Retry refund' }),
+    ).toHaveLength(1);
+  });
+
+  it('shows who paid, falling back to the user id', async () => {
+    renderDashboard({
+      initialUsers: [
+        {
+          id: 'member-1',
+          email: 'member@example.com',
+          firstName: 'Mem',
+          lastName: 'Ber',
+          role: 'MEMBER',
+          banned: false,
+        },
+      ],
+      initialPayments: [
+        payment(),
+        payment({ id: 'payment-of-gone-user', userId: 'gone-user' }),
+      ],
+    });
+    await openPayments();
+
+    const rows = screen.getAllByRole('row');
+    expect(within(rows[0]).getByText('Payer')).toBeInTheDocument();
+    expect(within(rows[1]).getByText('member@example.com')).toBeInTheDocument();
+    expect(within(rows[2]).getByText('gone-user')).toBeInTheDocument();
+  });
+
+  it('confirms a full refund with its amount and that the seat stays', async () => {
+    const fetchMock = mockApi({ '/api/checkout/payments': { body: [] } });
+    vi.mocked(confirm).mockReturnValue(false);
+    renderDashboard({ initialPayments: [payment()] });
+    const user = await openPayments();
+
+    await user.click(screen.getByRole('button', { name: 'Refund' }));
+
+    expect(confirm).toHaveBeenCalledWith(
+      "Refund 25.00 USD in full? The member's registration stays active.",
+    );
+    expect(refundCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('confirms a retry with the queued refund amount', async () => {
+    const fetchMock = mockApi({ '/api/checkout/payments': { body: [] } });
+    vi.mocked(confirm).mockReturnValue(false);
+    renderDashboard({
+      initialPayments: [
+        payment({ refundStatus: 'Failed', refundAmountCents: 1250 }),
+      ],
+    });
+    const user = await openPayments();
+
+    await user.click(screen.getByRole('button', { name: 'Retry refund' }));
+
+    expect(confirm).toHaveBeenCalledWith('Retry the 12.50 USD refund?');
+    expect(refundCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('disables the button while the refund is in flight', async () => {
+    let finish: (response: Response) => void = () => undefined;
+    const fetchMock = vi
+      .spyOn(global, 'fetch')
+      .mockImplementation((input) =>
+        String(input).endsWith('/refund')
+          ? new Promise<Response>((resolve) => (finish = resolve))
+          : Promise.resolve(new Response('[]')),
+      );
+    renderDashboard({ initialPayments: [payment()] });
+    const user = await openPayments();
+
+    await user.click(screen.getByRole('button', { name: 'Refund' }));
+    const button = screen.getByRole('button', { name: 'Refund' });
+    expect(button).toBeDisabled();
+    // A second activation while disabled must not send another request.
+    button.click();
+    expect(refundCalls(fetchMock)).toHaveLength(1);
+
+    finish(new Response('{}'));
+    expect(
+      await screen.findByText('Refund request processed.'),
+    ).toBeInTheDocument();
   });
 
   it.each(['Pending', 'Failed'] as const)(
@@ -150,7 +233,7 @@ describe('AdminDashboard payments', () => {
       renderDashboard({ initialPayments: [payment({ refundStatus })] });
       const user = await openPayments();
 
-      await user.click(screen.getByRole('button', { name: 'Refund' }));
+      await user.click(screen.getByRole('button', { name: 'Retry refund' }));
 
       expect(
         await screen.findByText('Refund request processed.'),
@@ -335,6 +418,16 @@ describe('AdminDashboard refund tiers', () => {
     expect(tierValues()).toEqual([['24', '100']]);
   });
 
+  it('defaults a missing policy to a full refund until the class cutoff', async () => {
+    await editClass({
+      ...yogaClass,
+      cancellationCutoffHours: 48,
+      refundPolicy: undefined,
+    });
+
+    expect(tierValues()).toEqual([['48', '100']]);
+  });
+
   it('adds, edits, and removes tiers and saves them as numbers', async () => {
     const fetchMock = mockApi({ '/api/classes': { body: [yogaClass] } });
     const user = await editClass();
@@ -367,13 +460,16 @@ describe('AdminDashboard refund tiers', () => {
     ['fractional hours', 'Hours before start', '1.5'],
     ['negative hours', 'Hours before start', '-1'],
     ['a fractional percentage', 'Refund %', '12.5'],
+    ['empty hours', 'Hours before start', ''],
+    ['an empty percentage', 'Refund %', ''],
+    ['partial number input', 'Refund %', '1e'],
   ])('rejects %s without saving', async (_label, field, value) => {
     const fetchMock = mockApi({});
     const user = await editClass();
 
     const input = screen.getAllByLabelText(field)[0];
     await user.clear(input);
-    await user.type(input, value);
+    if (value) await user.type(input, value);
     await user.click(screen.getByRole('button', { name: 'Save' }));
 
     expect(
@@ -382,5 +478,92 @@ describe('AdminDashboard refund tiers', () => {
       ),
     ).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects tiers that share a threshold', async () => {
+    const fetchMock = mockApi({});
+    const user = await editClass();
+
+    await user.click(screen.getByRole('button', { name: 'Add refund tier' }));
+    await user.click(screen.getByRole('button', { name: 'Add refund tier' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(
+      screen.getByText('Each refund tier needs a different number of hours.'),
+    ).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('requires a tier at or below the cancellation cutoff', async () => {
+    const fetchMock = mockApi({});
+    const user = await editClass();
+
+    const cutoff = screen.getByLabelText(/Cancellation cutoff/);
+    await user.clear(cutoff);
+    await user.type(cutoff, '12');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(
+      screen.getByText(
+        'Add a refund tier at or below the cancellation cutoff.',
+      ),
+    ).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['empty', ''],
+    ['fractional', '1.5'],
+  ])('rejects an %s cancellation cutoff', async (_label, value) => {
+    const fetchMock = mockApi({});
+    const user = await editClass();
+
+    const cutoff = screen.getByLabelText(/Cancellation cutoff/);
+    await user.clear(cutoff);
+    if (value) await user.type(cutoff, value);
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(
+      screen.getByText('Cancellation cutoff must be a whole number of hours.'),
+    ).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('shows a rejected save inside the dialog and clears it on retry', async () => {
+    let rejectSave = true;
+    vi.spyOn(global, 'fetch').mockImplementation((input, init) => {
+      if (String(input) === '/api/classes/1' && init?.method === 'PATCH') {
+        if (rejectSave) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                message: 'refundPolicy thresholds must be unique',
+              }),
+              { status: 400 },
+            ),
+          );
+        }
+      }
+      if (String(input) === '/api/classes') {
+        return Promise.resolve(new Response(JSON.stringify([yogaClass])));
+      }
+      return Promise.resolve(new Response('{}'));
+    });
+    const user = await editClass();
+
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    const dialog = screen.getByRole('dialog');
+    expect(
+      await within(dialog).findByText('refundPolicy thresholds must be unique'),
+    ).toBeInTheDocument();
+
+    rejectSave = false;
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText('Class updated.')).toBeInTheDocument();
+    expect(
+      screen.queryByText('refundPolicy thresholds must be unique'),
+    ).toBeNull();
   });
 });
