@@ -30,7 +30,7 @@ CREATE UNIQUE INDEX "Payment_stripePaymentIntentId_key" ON "Payment"("stripePaym
 CREATE UNIQUE INDEX "Payment_stripeRefundId_key" ON "Payment"("stripeRefundId");
 CREATE UNIQUE INDEX "Payment_active_user_class_key"
   ON "Payment"("userId", "classId")
-  WHERE "status" IN ('Pending', 'Paid');
+  WHERE "status" = 'Pending' OR ("status" = 'Paid' AND "refundStatus" = 'None');
 CREATE INDEX "Payment_userId_classId_status_idx" ON "Payment"("userId", "classId", "status");
 CREATE INDEX "Payment_classId_status_idx" ON "Payment"("classId", "status");
 CREATE INDEX "Payment_status_expiresAt_idx" ON "Payment"("status", "expiresAt");

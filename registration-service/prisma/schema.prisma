@@ -72,9 +72,11 @@ model Payment {
   createdAt                DateTime       @default(now())
   updatedAt                DateTime       @updatedAt
 
-  // At most one checkout in flight or paid per member and class.
+  // At most one checkout in flight or paid seat per member and class. A paid
+  // payment with a refund requested no longer holds the slot, so the member
+  // can book again and a late payment can be queued for a refund.
   // Written the way Postgres normalizes it so `prisma migrate diff` sees no drift.
-  @@unique([userId, classId], map: "Payment_active_user_class_key", where: raw("(status = ANY (ARRAY['Pending'::\"PaymentStatus\", 'Paid'::\"PaymentStatus\"]))"))
+  @@unique([userId, classId], map: "Payment_active_user_class_key", where: raw("((status = 'Pending'::\"PaymentStatus\") OR ((status = 'Paid'::\"PaymentStatus\") AND (\"refundStatus\" = 'None'::\"RefundStatus\")))"))
   @@index([userId, classId, status])
   @@index([classId, status])
   @@index([status, expiresAt])

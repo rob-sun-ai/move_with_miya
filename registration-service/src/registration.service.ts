@@ -82,7 +82,16 @@ const NOTIFICATION_LEASE_MS = 5 * 60 * 1_000;
 
 const MAX_CONTACT_PAGE_SIZE = 100;
 
-const ACTIVE_PAYMENT_STATUSES = ['Pending', 'Paid'] as const;
+/**
+ * Payments that hold a member's slot for a class: a checkout in flight or a
+ * paid seat with no refund requested. Matches `Payment_active_user_class_key`.
+ */
+const ACTIVE_PAYMENT_WHERE = {
+  OR: [
+    { status: 'Pending' as const },
+    { status: 'Paid' as const, refundStatus: 'None' as const },
+  ],
+};
 
 function assertPaymentInput(amountCents: number, currency: string) {
   if (!Number.isSafeInteger(amountCents) || amountCents <= 0) {
@@ -241,7 +250,7 @@ export class RegistrationService {
         where: {
           userId: data.userId,
           classId: data.classId,
-          status: { in: [...ACTIVE_PAYMENT_STATUSES] },
+          ...ACTIVE_PAYMENT_WHERE,
         },
         orderBy: { createdAt: 'desc' },
       });

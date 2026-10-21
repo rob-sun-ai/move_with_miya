@@ -157,6 +157,25 @@ describe('RegistrationService payments', () => {
       expect(prisma.payment.create).not.toHaveBeenCalled();
     });
 
+    it('lets a member whose paid seat is being refunded book again', async () => {
+      prisma.registration.findFirst.mockResolvedValue({ status: 'Canceled' });
+      // A paid payment with a refund requested no longer holds the slot.
+      prisma.payment.findFirst.mockResolvedValue(null);
+      prisma.payment.create.mockResolvedValue({ id: 'payment-2' });
+
+      await expect(service.createOrGetPendingPayment(input)).resolves.toEqual({
+        id: 'payment-2',
+      });
+      expect(prisma.payment.findFirst).toHaveBeenCalledWith({
+        where: {
+          userId: 'user-1',
+          classId: 10,
+          OR: [{ status: 'Pending' }, { status: 'Paid', refundStatus: 'None' }],
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+    });
+
     it('reuses an unexpired pending checkout for the same price', async () => {
       const pending = paymentRecord();
       prisma.registration.findFirst.mockResolvedValue({ status: 'Canceled' });
