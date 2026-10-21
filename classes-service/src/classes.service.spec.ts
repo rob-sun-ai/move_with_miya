@@ -238,6 +238,19 @@ describe('ClassesService date validation', () => {
       );
     });
 
+    it('defaults to a full refund until the class cancellation cutoff', async () => {
+      await service.createClass({ ...base, cancellationCutoffHours: 12 });
+
+      expect(prisma.yogaClass.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            cancellationCutoffHours: 12,
+            refundPolicy: [{ hoursBeforeStart: 12, percentage: 100 }],
+          }) as unknown,
+        }),
+      );
+    });
+
     it.each(['0', '15', '15.5', '15.50', 20])('accepts price %p', (cost) => {
       expect(() => service.createClass({ ...base, cost })).not.toThrow();
     });
@@ -379,7 +392,10 @@ describe('ClassesService date validation', () => {
         startDate: new Date('2026-09-01T10:00:00.000Z'),
         endDate: new Date('2026-09-01T11:00:00.000Z'),
         cancellationCutoffHours: 48,
-        refundPolicy: [{ hoursBeforeStart: 48, percentage: 100 }],
+        refundPolicy: [
+          { hoursBeforeStart: 72, percentage: 100 },
+          { hoursBeforeStart: 48, percentage: 50 },
+        ],
       });
 
       await expect(
@@ -388,6 +404,33 @@ describe('ClassesService date validation', () => {
         'refundPolicy must include a tier applicable at the cancellation cutoff',
       );
       expect(prisma.yogaClass.update).not.toHaveBeenCalled();
+    });
+
+    it('moves the default refund policy along with a cutoff update', async () => {
+      prisma.yogaClass.findUniqueOrThrow.mockResolvedValue({
+        startDate: new Date('2026-09-01T10:00:00.000Z'),
+        endDate: new Date('2026-09-01T11:00:00.000Z'),
+        cancellationCutoffHours: 24,
+        // Postgres jsonb returns keys in its own order.
+        refundPolicy: [{ percentage: 100, hoursBeforeStart: 24 }],
+      });
+      prisma.yogaClass.update.mockResolvedValue({ id: 1 });
+
+      await expect(
+        service.updateClass(1, {
+          name: 'Renamed',
+          cancellationCutoffHours: 12,
+        }),
+      ).resolves.toEqual({ id: 1 });
+      expect(prisma.yogaClass.update).toHaveBeenCalledWith({
+        where: { id: 1 },
+        data: {
+          name: 'Renamed',
+          cancellationCutoffHours: 12,
+          refundPolicy: [{ hoursBeforeStart: 12, percentage: 100 }],
+        },
+        include: { location: true },
+      });
     });
 
     it('validates a refund policy update against the effective cutoff', async () => {

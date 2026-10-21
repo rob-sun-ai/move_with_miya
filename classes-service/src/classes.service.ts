@@ -15,9 +15,17 @@ export interface RefundTier {
   percentage: number;
 }
 
-export const DEFAULT_REFUND_POLICY: RefundTier[] = [
-  { hoursBeforeStart: 24, percentage: 100 },
-];
+/** A full refund for any cancellation the class's cutoff allows. */
+export function defaultRefundPolicy(cutoffHours: number): RefundTier[] {
+  return [{ hoursBeforeStart: cutoffHours, percentage: 100 }];
+}
+
+// Compares fields rather than JSON text: Postgres jsonb reorders object keys.
+function isDefaultRefundPolicy(policy: unknown, cutoffHours: number) {
+  if (!Array.isArray(policy) || policy.length !== 1) return false;
+  const tier = policy[0] as Partial<RefundTier> | null;
+  return tier?.hoursBeforeStart === cutoffHours && tier.percentage === 100;
+}
 
 /** Plain objects, as Prisma's JSON input type requires. */
 function toJson(policy: RefundTier[]) {
@@ -274,7 +282,8 @@ export class ClassesService {
       throw new BadRequestException('endDate must be after startDate');
     }
     const cancellationCutoffHours = fields.cancellationCutoffHours ?? 24;
-    const refundPolicy = fields.refundPolicy ?? DEFAULT_REFUND_POLICY;
+    const refundPolicy =
+      fields.refundPolicy ?? defaultRefundPolicy(cancellationCutoffHours);
     this.validateRefundPolicyCutoff(refundPolicy, cancellationCutoffHours);
 
     return this.prisma.client.yogaClass.create({
@@ -341,7 +350,17 @@ export class ClassesService {
         }
 
         const cutoffHours = updateData.cancellationCutoffHours;
-        if (refundPolicy !== undefined || cutoffHours !== undefined) {
+        if (
+          refundPolicy === undefined &&
+          cutoffHours !== undefined &&
+          isDefaultRefundPolicy(
+            persistedClass.refundPolicy,
+            persistedClass.cancellationCutoffHours,
+          )
+        ) {
+          // The default policy follows the cutoff it was derived from.
+          writeData.refundPolicy = toJson(defaultRefundPolicy(cutoffHours));
+        } else if (refundPolicy !== undefined || cutoffHours !== undefined) {
           this.validateRefundPolicyCutoff(
             refundPolicy ?? this.parseRefundPolicy(persistedClass.refundPolicy),
             cutoffHours ?? persistedClass.cancellationCutoffHours,
