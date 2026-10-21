@@ -29,7 +29,6 @@ async function bootstrap() {
     'GOOGLE_CLIENT_SECRET',
     'GOOGLE_CALLBACK_URL',
     'REDIS_URL',
-    'RABBITMQ_URL',
     'DATABASE_URL',
   ]);
 

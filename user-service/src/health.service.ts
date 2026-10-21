@@ -1,8 +1,31 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { connect } from 'amqplib';
 import { createClient } from 'redis';
 import { PrismaService } from './prisma/prisma.service';
+
+/** Upper bound for each dependency check, so a hung dependency fails fast. */
+export const CHECK_TIMEOUT_MS = 2_000;
+
+/** Rejects when `check` has not settled within `ms`. */
+export async function withTimeout<T>(
+  check: Promise<T>,
+  ms = CHECK_TIMEOUT_MS,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      check,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Timed out after ${ms} ms`)),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 @Injectable()
 export class HealthService {
@@ -45,11 +68,11 @@ export class HealthService {
   }
 
   private async checkReadiness() {
-    const dependencies = {
-      postgres: await this.checkPostgres(),
-      redis: await this.checkRedis(),
-      rabbitmq: await this.checkRabbitMq(),
-    };
+    const [postgres, redis] = await Promise.all([
+      this.checkPostgres(),
+      this.checkRedis(),
+    ]);
+    const dependencies = { postgres, redis };
     const ready = Object.values(dependencies).every((value) => value === 'ok');
     return {
       status: ready ? 'ok' : 'error',
@@ -61,7 +84,7 @@ export class HealthService {
 
   private async checkPostgres(): Promise<'ok' | 'error'> {
     try {
-      await this.prisma.client.$queryRaw`SELECT 1`;
+      await withTimeout(this.prisma.client.$queryRaw`SELECT 1`);
       return 'ok';
     } catch {
       return 'error';
@@ -69,29 +92,27 @@ export class HealthService {
   }
 
   private async checkRedis(): Promise<'ok' | 'error'> {
+    // A probe must not retry: with the default reconnect strategy a failed
+    // connect leaves the client open, and quitting it then never settles.
     const client = createClient({
       url: this.config.get<string>('REDIS_URL', 'redis://localhost:6379'),
+      socket: { connectTimeout: CHECK_TIMEOUT_MS, reconnectStrategy: false },
     });
+    // Failures surface through connect() and ping(); without a listener an
+    // 'error' event would crash the process.
+    client.on('error', () => undefined);
     try {
-      await client.connect();
-      await client.ping();
+      await withTimeout(
+        (async () => {
+          await client.connect();
+          await client.ping();
+        })(),
+      );
       return 'ok';
     } catch {
       return 'error';
     } finally {
-      if (client.isOpen) await client.quit();
-    }
-  }
-
-  private async checkRabbitMq(): Promise<'ok' | 'error'> {
-    const url = this.config.get<string>('RABBITMQ_URL');
-    if (!url) return 'error';
-    try {
-      const connection = await connect(url);
-      await connection.close();
-      return 'ok';
-    } catch {
-      return 'error';
+      if (client.isOpen) client.destroy();
     }
   }
 }
