@@ -10,15 +10,18 @@ groups:
           summary: '{{ $labels.job }} metrics endpoint is unavailable'
       - alert: HighHttpErrorRate
         # A true ratio, ignoring windows with fewer than five requests so a
-        # single error on a quiet site does not page anyone.
-        expr: (sum(rate(move_with_miya_http_requests_total{status_code=~"5.."}[5m])) / sum(rate(move_with_miya_http_requests_total[5m])) > 0.05) and sum(increase(move_with_miya_http_requests_total[5m])) >= 5
+        # single error on a quiet site does not page anyone. Prometheus
+        # scrapes and Compose healthchecks are excluded: they add about 200
+        # successful requests every 5 minutes and would hide real errors.
+        expr: (sum(rate(move_with_miya_http_requests_total{status_code=~"5..", route!~"/metrics|/health/.*"}[5m])) / sum(rate(move_with_miya_http_requests_total{route!~"/metrics|/health/.*"}[5m])) > 0.05) and sum(increase(move_with_miya_http_requests_total{route!~"/metrics|/health/.*"}[5m])) >= 5
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: 'HTTP 5xx rate is above 5%'
       - alert: HighHttpLatency
-        expr: histogram_quantile(0.95, sum(rate(move_with_miya_http_request_duration_seconds_bucket[5m])) by (le)) > 1
+        # Probe requests are excluded for the same reason as above.
+        expr: histogram_quantile(0.95, sum(rate(move_with_miya_http_request_duration_seconds_bucket{route!~"/metrics|/health/.*"}[5m])) by (le)) > 1
         for: 10m
         labels:
           severity: warning
