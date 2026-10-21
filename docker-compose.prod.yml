@@ -1,6 +1,6 @@
 services:
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.11-alpine
     restart: unless-stopped
     volumes:
       - redis-data:/data
@@ -11,7 +11,7 @@ services:
       retries: 5
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.15-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
@@ -21,13 +21,17 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro,z
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -h 127.0.0.1 -U ${POSTGRES_USER} -d ${POSTGRES_DB}',
+        ]
       interval: 5s
       timeout: 3s
       retries: 5
 
   rabbitmq:
-    image: rabbitmq:3-alpine
+    image: rabbitmq:3.13.7-alpine
     restart: unless-stopped
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?RABBITMQ_USER is required}
@@ -39,7 +43,7 @@ services:
       retries: 5
 
   user-service:
-    image: move-with-miya/user-service:${RELEASE_VERSION:-development}
+    image: move-with-miya/user-service:${RELEASE_VERSION:?RELEASE_VERSION is required}
     build:
       context: ./user-service
       dockerfile: Dockerfile.prod
@@ -56,7 +60,7 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?GOOGLE_CLIENT_ID is required}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:?GOOGLE_CLIENT_SECRET is required}
       GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL:?GOOGLE_CALLBACK_URL is required}
-      RELEASE_VERSION: ${RELEASE_VERSION:-development}
+      RELEASE_VERSION: ${RELEASE_VERSION:?RELEASE_VERSION is required}
     depends_on:
       redis:
         condition: service_healthy
@@ -75,7 +79,7 @@ services:
       retries: 6
 
   user-migrate:
-    image: move-with-miya/user-service:${RELEASE_VERSION:-development}
+    image: move-with-miya/user-service:${RELEASE_VERSION:?RELEASE_VERSION is required}
     pull_policy: never
     restart: 'no'
     environment:
@@ -87,7 +91,7 @@ services:
         condition: service_healthy
 
   backend:
-    image: move-with-miya/backend:${RELEASE_VERSION:-development}
+    image: move-with-miya/backend:${RELEASE_VERSION:?RELEASE_VERSION is required}
     build:
       context: ./backend
       dockerfile: Dockerfile.prod
@@ -132,7 +136,7 @@ services:
       USER_HEALTH_URL: http://user-service:3001/health/ready
       CLASSES_HEALTH_URL: http://classes-service:3004/health/ready
       REGISTRATION_HEALTH_URL: http://registration-service:3005/health/ready
-      RELEASE_VERSION: ${RELEASE_VERSION:-development}
+      RELEASE_VERSION: ${RELEASE_VERSION:?RELEASE_VERSION is required}
     depends_on:
       redis:
         condition: service_healthy
@@ -149,7 +153,7 @@ services:
       retries: 6
 
   classes-service:
-    image: move-with-miya/classes-service:${RELEASE_VERSION:-development}
+    image: move-with-miya/classes-service:${RELEASE_VERSION:?RELEASE_VERSION is required}
     build:
       context: ./classes-service
       dockerfile: Dockerfile.prod
@@ -161,7 +165,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/miya_classes
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672
       HEALTH_PORT: 3004
-      RELEASE_VERSION: ${RELEASE_VERSION:-development}
+      RELEASE_VERSION: ${RELEASE_VERSION:?RELEASE_VERSION is required}
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -180,7 +184,7 @@ services:
       retries: 6
 
   classes-migrate:
-    image: move-with-miya/classes-service:${RELEASE_VERSION:-development}
+    image: move-with-miya/classes-service:${RELEASE_VERSION:?RELEASE_VERSION is required}
     pull_policy: never
     restart: 'no'
     environment:
@@ -192,7 +196,7 @@ services:
         condition: service_healthy
 
   registration-service:
-    image: move-with-miya/registration-service:${RELEASE_VERSION:-development}
+    image: move-with-miya/registration-service:${RELEASE_VERSION:?RELEASE_VERSION is required}
     build:
       context: ./registration-service
       dockerfile: Dockerfile.prod
@@ -204,7 +208,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/miya_registrations
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672
       HEALTH_PORT: 3005
-      RELEASE_VERSION: ${RELEASE_VERSION:-development}
+      RELEASE_VERSION: ${RELEASE_VERSION:?RELEASE_VERSION is required}
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -223,7 +227,7 @@ services:
       retries: 6
 
   registration-migrate:
-    image: move-with-miya/registration-service:${RELEASE_VERSION:-development}
+    image: move-with-miya/registration-service:${RELEASE_VERSION:?RELEASE_VERSION is required}
     pull_policy: never
     restart: 'no'
     environment:
@@ -235,7 +239,7 @@ services:
         condition: service_healthy
 
   frontend:
-    image: move-with-miya/frontend:${RELEASE_VERSION:-development}
+    image: move-with-miya/frontend:${RELEASE_VERSION:?RELEASE_VERSION is required}
     build:
       context: ./frontend
       dockerfile: Dockerfile.prod
@@ -249,7 +253,7 @@ services:
       NODE_ENV: production
       USER_SERVICE_URL: http://user-service:3001
       BACKEND_URL: http://backend:3000
-      RELEASE_VERSION: ${RELEASE_VERSION:-development}
+      RELEASE_VERSION: ${RELEASE_VERSION:?RELEASE_VERSION is required}
     depends_on:
       backend:
         condition: service_healthy
@@ -266,16 +270,21 @@ services:
       retries: 6
 
   nginx:
-    image: nginx:alpine
+    image: nginx:1.31.7-alpine
     ports:
       - '80:80'
       - '443:443'
     volumes:
       - ./nginx/nginx.prod.conf:/etc/nginx/templates/default.conf.template:ro,z
-      - ${TLS_CERT_FILE:?TLS_CERT_FILE is required}:/etc/nginx/tls/fullchain.pem:ro,z
-      - ${TLS_KEY_FILE:?TLS_KEY_FILE is required}:/etc/nginx/tls/privkey.pem:ro,z
+      # The whole certificate tree, mounted at the same path, so Let's Encrypt's
+      # live/ symlinks keep resolving to the current archive/ files after a
+      # renewal. TLS_CERT_FILE and TLS_KEY_FILE must be inside TLS_CERT_DIR.
+      - ${TLS_CERT_DIR:-/etc/letsencrypt}:${TLS_CERT_DIR:-/etc/letsencrypt}:ro,z
+      - ${ACME_WEBROOT:-/var/www/acme}:/var/www/acme:ro,z
     environment:
       PUBLIC_HOST: ${PUBLIC_HOST:?PUBLIC_HOST is required}
+      TLS_CERT_FILE: ${TLS_CERT_FILE:?TLS_CERT_FILE is required}
+      TLS_KEY_FILE: ${TLS_KEY_FILE:?TLS_KEY_FILE is required}
     restart: unless-stopped
     depends_on:
       backend:

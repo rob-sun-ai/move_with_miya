@@ -142,8 +142,10 @@ jobs:
       STRIPE_SECRET_KEY: sk_test_ci
       STRIPE_WEBHOOK_SECRET: whsec_ci
       STRIPE_CURRENCY: usd
+      TLS_CERT_DIR: /tmp
       TLS_CERT_FILE: /tmp/fullchain.pem
       TLS_KEY_FILE: /tmp/privkey.pem
+      RELEASE_VERSION: ci
     steps:
       - uses: actions/checkout@v4
         with:
@@ -160,10 +162,12 @@ jobs:
             --add-host frontend:127.0.0.1 \
             --add-host backend:127.0.0.1 \
             -e PUBLIC_HOST=ci.example.test \
+            -e TLS_CERT_FILE=/etc/nginx/tls/fullchain.pem \
+            -e TLS_KEY_FILE=/etc/nginx/tls/privkey.pem \
             -v "$PWD/nginx/nginx.prod.conf:/etc/nginx/templates/default.conf.template:ro" \
             -v /tmp/fullchain.pem:/etc/nginx/tls/fullchain.pem:ro \
             -v /tmp/privkey.pem:/etc/nginx/tls/privkey.pem:ro \
-            nginx:alpine nginx -t
+            nginx:1.31.7-alpine nginx -t
       - name: Check Compose invariants
         run: python3 ops/check-compose.py
       - name: Exercise nginx routing

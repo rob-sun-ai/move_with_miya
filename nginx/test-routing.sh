@@ -13,6 +13,9 @@ cleanup() {
   rm -rf "$work"
 }
 trap cleanup EXIT
+mkdir -p "$work/acme/.well-known/acme-challenge"
+echo acme-token >"$work/acme/.well-known/acme-challenge/token"
+chmod -R a+rX "$work"
 
 docker run --rm -v "$work:/out" alpine/openssl req -x509 -newkey rsa:2048 \
   -nodes -days 1 -subj "/CN=$host" \
@@ -22,9 +25,12 @@ docker run -d --name "$container" -p 127.0.0.1::80 -p 127.0.0.1::443 \
   --add-host frontend:127.0.0.1 \
   --add-host backend:127.0.0.1 \
   -e PUBLIC_HOST="$host" \
+  -e TLS_CERT_FILE=/etc/nginx/tls/fullchain.pem \
+  -e TLS_KEY_FILE=/etc/nginx/tls/privkey.pem \
   -v "$PWD/nginx/nginx.prod.conf:/etc/nginx/templates/default.conf.template:ro" \
   -v "$work:/etc/nginx/tls:ro" \
-  nginx:alpine >/dev/null
+  -v "$work/acme:/var/www/acme:ro" \
+  nginx:1.31.7-alpine >/dev/null
 http_port=$(docker port "$container" 80 | head -1 | cut -d: -f2)
 https_port=$(docker port "$container" 443 | head -1 | cut -d: -f2)
 
@@ -53,6 +59,9 @@ check 'HTTP redirects to HTTPS on the public host' \
   "308 https://$host/classes?x=1" \
   "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' \
     -H "Host: $host" "http://127.0.0.1:$http_port/classes?x=1")"
+check 'ACME challenges are served over HTTP, not redirected' 'acme-token 200' \
+  "$(curl -s -w ' %{http_code}' -H "Host: $host" \
+    "http://127.0.0.1:$http_port/.well-known/acme-challenge/token" | tr -d '\n')"
 # Express matches routes case-insensitively, so case variants must be blocked too.
 for path in /metrics /api/metrics /api/metrics/ /api//metrics '/api/%6Detrics' \
   /api/METRICS /api/Metrics /api/MeTrIcS/ '/api/%4Detrics'; do
