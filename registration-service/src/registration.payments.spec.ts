@@ -808,6 +808,42 @@ describe('RegistrationService payments', () => {
       });
     });
 
+    it('reads and queues the refund in one serializable transaction', async () => {
+      prisma.payment.findUnique.mockResolvedValue(
+        paymentRecord({ status: 'Paid' }),
+      );
+
+      await service.beginPaymentRefund({
+        paymentId: 'payment-1',
+        percentage: 100,
+      });
+
+      expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
+        isolationLevel: 'Serializable',
+      });
+    });
+
+    it('rejects a different refund queued by a concurrent request', async () => {
+      // The first attempt conflicts with a cancellation that queued a 50%
+      // refund; the retry sees it instead of overwriting it.
+      prisma.$transaction.mockRejectedValueOnce({ code: 'P2034' });
+      prisma.payment.findUnique.mockResolvedValue(
+        paymentRecord({
+          status: 'Paid',
+          refundStatus: 'Pending',
+          refundPercentage: 50,
+        }),
+      );
+
+      await expect(
+        service.beginPaymentRefund({ paymentId: 'payment-1', percentage: 100 }),
+      ).rejects.toMatchObject({
+        message: 'A different refund is already in progress',
+      });
+      expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+      expect(prisma.payment.update).not.toHaveBeenCalled();
+    });
+
     it('rounds partial refunds down to whole cents', async () => {
       prisma.payment.findUnique.mockResolvedValue(
         paymentRecord({ status: 'Paid', amountCents: 999 }),

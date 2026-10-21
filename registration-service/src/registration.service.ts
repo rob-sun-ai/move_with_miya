@@ -565,23 +565,27 @@ export class RegistrationService {
 
   async beginPaymentRefund(data: { paymentId: string; percentage: number }) {
     assertRefundPercentage(data.percentage);
-    const payment = await this.prisma.client.payment.findUnique({
-      where: { id: data.paymentId },
-    });
-    if (!payment) throw new RpcError(404, 'Payment not found');
-    if (payment.status !== 'Paid') {
-      throw new RpcError(409, 'Only paid payments can be refunded');
-    }
-    if (payment.refundStatus === 'Succeeded') return payment;
-    if (
-      payment.refundStatus === 'Pending' &&
-      payment.refundPercentage !== data.percentage
-    ) {
-      throw new RpcError(409, 'A different refund is already in progress');
-    }
-    return this.prisma.client.payment.update({
-      where: { id: payment.id },
-      data: refundRequest(payment.amountCents, data.percentage),
+    // Serializable so a concurrent request (an admin refund racing a member
+    // cancellation) cannot replace a refund queued after this one read it.
+    return this.runSerializable(async (tx) => {
+      const payment = await tx.payment.findUnique({
+        where: { id: data.paymentId },
+      });
+      if (!payment) throw new RpcError(404, 'Payment not found');
+      if (payment.status !== 'Paid') {
+        throw new RpcError(409, 'Only paid payments can be refunded');
+      }
+      if (payment.refundStatus === 'Succeeded') return payment;
+      if (
+        payment.refundStatus === 'Pending' &&
+        payment.refundPercentage !== data.percentage
+      ) {
+        throw new RpcError(409, 'A different refund is already in progress');
+      }
+      return tx.payment.update({
+        where: { id: payment.id },
+        data: refundRequest(payment.amountCents, data.percentage),
+      });
     });
   }
 
