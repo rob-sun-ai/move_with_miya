@@ -270,7 +270,11 @@ export class RegistrationController {
     if (cls.endDate && new Date(cls.endDate).getTime() <= Date.now()) {
       throw new ForbiddenException('This class has already ended');
     }
-    if (Number(cls.cost ?? 0) > 0) {
+    const cost = Number(cls.cost ?? 0);
+    if (!Number.isFinite(cost) || cost < 0) {
+      throw new ServiceUnavailableException('Class price is invalid');
+    }
+    if (cost > 0) {
       throw new ConflictException('Paid classes require Stripe Checkout');
     }
     const capacity = cls.capacity;

@@ -175,6 +175,29 @@ describe('RegistrationController', () => {
       expect(client.send).not.toHaveBeenCalled();
     });
 
+    it.each(['free', '-5', 'NaN'])(
+      'rejects direct registration for a class priced %p',
+      async (cost) => {
+        classesClient.send.mockReturnValue(
+          of({
+            id: 1,
+            capacity: 10,
+            cost,
+            endDate: '2099-01-01T00:00:00.000Z',
+          }),
+        );
+
+        await expect(
+          controller.createRegistration(
+            buildRequest(sessionUserId),
+            1,
+            sessionUserId,
+          ),
+        ).rejects.toMatchObject({ message: 'Class price is invalid' });
+        expect(client.send).not.toHaveBeenCalled();
+      },
+    );
+
     it('forbids registration for an ended class', async () => {
       classesClient.send.mockReturnValue(
         of({ id: 1, endDate: '2000-01-01T00:00:00.000Z' }),
