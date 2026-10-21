@@ -1,13 +1,10 @@
+import './env';
 import './telemetry';
-import { config } from 'dotenv';
-import { resolve } from 'node:path';
 import { NestFactory } from '@nestjs/core';
 import { MicroserviceOptions, Transport } from '@nestjs/microservices';
 import { RegistrationModule } from './registration.module';
 import { requestTelemetry } from './metrics';
 import { assertProductionConfig } from './config-validation';
-
-config({ path: resolve(process.cwd(), '../.env') });
 
 async function bootstrap() {
   assertProductionConfig(['DATABASE_URL', 'RABBITMQ_URL']);

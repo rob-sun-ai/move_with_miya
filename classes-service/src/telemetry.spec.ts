@@ -29,6 +29,7 @@ describe('telemetry', () => {
     handlers.clear();
     process.env = { ...originalEnv };
     delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    delete process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT;
     delete process.env.OTEL_SERVICE_NAME;
     jest.spyOn(process, 'once').mockImplementation((event, handler) => {
       handlers.set(event, handler as () => void);
@@ -90,12 +91,65 @@ describe('telemetry', () => {
     });
   });
 
-  it.each(['SIGTERM', 'SIGINT'])('flushes traces on %s', (signal) => {
-    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://collector:4318/v1/traces';
+  it.each([
+    ['http://collector:4318', 'http://collector:4318/v1/traces'],
+    ['http://collector:4318/', 'http://collector:4318/v1/traces'],
+    ['http://collector:4318/v1/traces', 'http://collector:4318/v1/traces'],
+  ])('treats OTEL_EXPORTER_OTLP_ENDPOINT=%s as a base URL', (base, url) => {
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = base;
 
     load();
-    handlers.get(signal)?.();
 
-    expect(shutdown).toHaveBeenCalledTimes(1);
+    expect(OTLPTraceExporter).toHaveBeenCalledWith({ url });
+  });
+
+  it('prefers the full OTEL_EXPORTER_OTLP_TRACES_ENDPOINT URL', () => {
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://collector:4318';
+    process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT =
+      'http://traces:9999/ingest';
+
+    load();
+
+    expect(OTLPTraceExporter).toHaveBeenCalledWith({
+      url: 'http://traces:9999/ingest',
+    });
+  });
+
+  it.each(['SIGTERM', 'SIGINT'])(
+    'flushes traces and exits on %s',
+    async (signal) => {
+      process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://collector:4318';
+      const exit = jest
+        .spyOn(process, 'exit')
+        .mockImplementation((() => undefined) as never);
+
+      load();
+      handlers.get(signal)?.();
+
+      expect(shutdown).toHaveBeenCalledTimes(1);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(exit).toHaveBeenCalledWith(0);
+    },
+  );
+
+  it('exits even when flushing traces fails', async () => {
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://collector:4318';
+    shutdown.mockRejectedValueOnce(new Error('collector down'));
+    const logError = jest
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    const exit = jest
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+
+    load();
+    handlers.get('SIGTERM')?.();
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(logError).toHaveBeenCalledWith(
+      'Trace flush failed',
+      expect.any(Error),
+    );
+    expect(exit).toHaveBeenCalledWith(0);
   });
 });
