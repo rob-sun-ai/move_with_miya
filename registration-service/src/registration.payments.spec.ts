@@ -488,7 +488,6 @@ describe('RegistrationService payments', () => {
             status: 'Paid',
             paidAt,
             stripePaymentIntentId: 'pi_1',
-            registrationId: 3,
           }),
         );
 
@@ -506,6 +505,26 @@ describe('RegistrationService payments', () => {
           }) as unknown,
         });
       });
+
+      it.each([
+        ['canceled', { classStatus: 'Canceled' }],
+        ['completed', { classStatus: 'Completed' }],
+        ['over', { classEndAt: PAST }],
+      ])(
+        'does not refund a fulfilled payment when the class is %s',
+        async (_l, o) => {
+          const registration = { id: 3, status: 'Registered' };
+          prisma.payment.findUnique.mockResolvedValue(
+            paymentRecord({ status: 'Paid', registrationId: 3 }),
+          );
+          prisma.registration.findUnique.mockResolvedValue(registration);
+
+          await expect(
+            service.finalizePaidRegistration({ ...input, ...o }),
+          ).resolves.toMatchObject({ registration, needsRefund: false });
+          expect(prisma.payment.update).not.toHaveBeenCalled();
+        },
+      );
     });
 
     it('returns an already fulfilled payment unchanged', async () => {

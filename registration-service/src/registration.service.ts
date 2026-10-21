@@ -419,6 +419,18 @@ export class RegistrationService {
           },
         });
 
+      // A replayed webhook for a fulfilled payment changes nothing, even once
+      // the class is over: the member had the seat. Refunds for a canceled
+      // class are queued by beginClassRefunds.
+      const fulfilledRegistrationId =
+        payment.status === 'Paid' ? payment.registrationId : null;
+      if (fulfilledRegistrationId && payment.refundStatus === 'None') {
+        const registration = await tx.registration.findUnique({
+          where: { id: fulfilledRegistrationId },
+        });
+        return { payment, registration, needsRefund: false };
+      }
+
       const classUnavailable =
         data.classStatus === 'Canceled' ||
         data.classStatus === 'Completed' ||
@@ -448,9 +460,9 @@ export class RegistrationService {
         };
       }
 
-      if (payment.status === 'Paid' && payment.registrationId) {
+      if (fulfilledRegistrationId) {
         const registration = await tx.registration.findUnique({
-          where: { id: payment.registrationId },
+          where: { id: fulfilledRegistrationId },
         });
         return { payment, registration, needsRefund: false };
       }
