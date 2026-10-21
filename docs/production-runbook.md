@@ -91,18 +91,21 @@ Every night at 03:30 UTC, [ops/backup-postgres.sh](../ops/backup-postgres.sh):
 3. copies the encrypted files and a `SHA256SUMS` file to `BACKUP_REMOTE` with rclone, never overwriting existing files, and
 4. prunes local copies older than `BACKUP_LOCAL_RETENTION_DAYS` (default 7).
 
-If a run fails, a `BackupFailed` alert is emailed and stays active until the next successful run clears it. Redis (sessions, rate limits) and RabbitMQ (queues) are not backed up; they rebuild themselves. netcup server snapshots are a useful extra layer but not a substitute: they stay with the same provider and are not consistent database dumps.
+If a run fails (including a missing setting or tool, or a run that exceeds the unit's 2-hour `TimeoutStartSec`), a `BackupFailed` alert is emailed and stays active until the next successful run clears it. That alert cannot fire when the timer never runs, the host is down, or Docker is broken, so also set `BACKUP_HEARTBEAT_URL` to a dead man's switch (for example a [healthchecks.io](https://healthchecks.io) check with a 1-day period and a 2-hour grace time): it is pinged after every successful backup and emails you when pings stop. Without it, check `systemctl list-timers` and the latest file in B2 regularly. Redis (sessions, rate limits) and RabbitMQ (queues) are not backed up; they rebuild themselves. netcup server snapshots are a useful extra layer but not a substitute: they stay with the same provider and are not consistent database dumps.
 
 ### One-time setup
 
 1. **Encryption key, on your own machine (not the server).** Run `age-keygen -o miya-backup-key.txt`. Store the file in your password manager plus one offline copy; without it no backup can be read. Put the printed public key (`age1…`) in `AGE_RECIPIENT`.
 2. **Off-host storage: Backblaze B2, EU Central region.**
-   - Create a private bucket.
+   - Create a private bucket with **Object Lock** enabled and a default retention of **compliance mode, 30 days** (web UI: bucket settings → Object Lock; CLI: `b2 bucket create --file-lock-enabled --default-retention-mode compliance --default-retention-period "30 days" <bucket> allPrivate`). Every uploaded file version then cannot be deleted or overwritten by anyone, including you, until its retention ends.
    - Add a lifecycle rule that hides files 30 days after upload and deletes them 1 day after hiding. B2 then enforces retention, not the server.
-   - Create an upload key for the server that cannot delete, for example with the B2 CLI: `b2 key create --bucket <bucket> miya-backup-upload listBuckets,listFiles,writeFiles`. A compromised server then cannot erase the backups.
+   - Create an upload key for the server, for example with the B2 CLI: `b2 key create --bucket <bucket> miya-backup-upload listBuckets,listFiles,writeFiles`. Do not give it `deleteFiles`, `writeFileRetentions`, or `bypassGovernance`.
    - Create a separate read key (`listBuckets,listFiles,readFiles`) for restores and keep it off the server.
+
+   Object Lock is what protects the backups from a compromised server. The upload key alone does not: `writeFiles` also allows hiding files and uploading new versions over them, and the lifecycle rule would then permanently delete the hidden versions a day later. With Object Lock, hidden or superseded versions stay for their 30-day retention; recover them by unhiding them (web UI, or `b2 file unhide b2://<bucket>/<path>`) or by listing them with `rclone ls --b2-versions`.
 3. **Server.** Install the tools with `sudo apt install age rclone`, then fill in the backup and `RCLONE_CONFIG_B2_*` values in the env file. rclone reads its remote from those variables, so no rclone config file is needed. Test with `sudo ENV_FILE=/etc/move-with-miya/env.production ./ops/backup-postgres.sh`.
-4. **Schedule.** Copy `ops/systemd/move-with-miya-backup.{service,timer}` to `/etc/systemd/system/`, adjust the checkout and env-file paths in the service, then run `sudo systemctl daemon-reload && sudo systemctl enable --now move-with-miya-backup.timer`. `systemctl list-timers move-with-miya-backup.timer` shows the next run.
+4. **Dead man's switch.** Create a check that expects a ping every day (1-day period, about 2-hour grace) and put its ping URL in `BACKUP_HEARTBEAT_URL`. The script needs `curl` only when this is set.
+5. **Schedule.** Copy `ops/systemd/move-with-miya-backup.{service,timer}` to `/etc/systemd/system/`, adjust the checkout and env-file paths in the service, then run `sudo systemctl daemon-reload && sudo systemctl enable --now move-with-miya-backup.timer`. `systemctl list-timers move-with-miya-backup.timer` shows the next run.
 
 ### Restore drill (monthly, on your own machine)
 
@@ -133,6 +136,6 @@ ENV_FILE=/etc/move-with-miya/env.production ./ops/restore-postgres.sh
 compose up -d user-service backend classes-service registration-service
 ```
 
-Files that are not in `BACKUP_DIR` are fetched from `RESTORE_REMOTE`, a remote using the read key (the server's own key can only upload). Checksums are verified before anything is restored. Remove the read key and the private age key from the server afterwards.
+Files that are not in `BACKUP_DIR` are fetched from `RESTORE_REMOTE`, a remote using the read key (the server's own key can only upload). Checksums are verified before anything is restored. Each dump is restored in a single transaction into a fresh `<database>_restore` database; only after all three succeed are the live databases dropped (`WITH (FORCE)`, closing any remaining connections) and replaced. A failed restore therefore leaves production data as it was (a leftover `*_restore` database is dropped by the next attempt), and tables created by migrations after the backup do not survive a successful one. Remove the read key and the private age key from the server afterwards.
 
 The backup and restore scripts are tested by `ops/tests/run.sh` (real age and rclone, with a Docker test double), which CI runs together with shellcheck.

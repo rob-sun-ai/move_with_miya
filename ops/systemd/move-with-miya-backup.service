@@ -10,3 +10,10 @@ Type=oneshot
 WorkingDirectory=/opt/move_with_miya
 Environment=ENV_FILE=/etc/move-with-miya/env.production
 ExecStart=/opt/move_with_miya/ops/backup-postgres.sh
+# A oneshot unit has no start timeout by default, and a hung run (rclone
+# retrying, a stuck docker exec) would block every later timer run. On timeout
+# systemd sends SIGTERM, the script exits non-zero and raises BackupFailed.
+TimeoutStartSec=2h
+# Plaintext dumps live in the script's temp directory; keep it private to the
+# unit and removed by systemd even if the script is killed.
+PrivateTmp=yes

@@ -100,21 +100,60 @@ test_requires_an_encryption_recipient() {
   output=$(backup 2>&1) && fail 'expected failure'
   assert_contains "$output" 'AGE_RECIPIENT is required for encrypted backups'
   assert_eq "$(grep -c pg_dump "$SHIM_DIR/docker.log")" 0
+  assert_contains "$(cat "$SHIM_DIR/alerts.log")" BackupFailed
+}
+
+test_alerts_when_the_env_file_is_invalid() {
+  printf 'NOT A PAIR\n' >> "$ENV_FILE"
+  backup >/dev/null 2>&1 && fail 'expected failure'
+  assert_contains "$(cat "$SHIM_DIR/alerts.log")" BackupFailed
 }
 
 test_requires_an_off_host_remote() {
   sed -i '/^BACKUP_REMOTE=/d' "$ENV_FILE"
   output=$(backup 2>&1) && fail 'expected failure'
   assert_contains "$output" 'BACKUP_REMOTE is required for off-host backups'
+  assert_contains "$(cat "$SHIM_DIR/alerts.log")" BackupFailed
 }
 
 test_requires_rclone() {
   mkdir "$SANDBOX/bin"
-  for tool in age sha256sum docker bash sh date mktemp; do
+  for tool in age sha256sum docker bash sh date mktemp sed; do
     ln -s "$(command -v "$tool")" "$SANDBOX/bin/$tool"
   done
   output=$(PATH="$SANDBOX/bin" backup 2>&1) && fail 'expected failure'
   assert_contains "$output" 'Missing required command: rclone'
+  assert_contains "$(cat "$SHIM_DIR/alerts.log")" BackupFailed
+}
+
+# Puts a curl test double first on PATH that logs its URL and exits $1.
+fake_curl() {
+  mkdir -p "$SANDBOX/bin"
+  printf '#!/bin/sh\nfor arg; do url=$arg; done\necho "$url" >> "%s/curl.log"\nexit %s\n' \
+    "$SANDBOX" "$1" > "$SANDBOX/bin/curl"
+  chmod +x "$SANDBOX/bin/curl"
+  export PATH="$SANDBOX/bin:$PATH"
+  printf 'BACKUP_HEARTBEAT_URL=https://hc.example.test/ping/abc\n' >> "$ENV_FILE"
+}
+
+test_pings_the_heartbeat_after_success() {
+  fake_curl 0
+  backup >/dev/null 2>&1 || fail 'backup failed'
+  assert_eq "$(cat "$SANDBOX/curl.log")" 'https://hc.example.test/ping/abc'
+}
+
+test_does_not_ping_the_heartbeat_when_the_backup_fails() {
+  fake_curl 0
+  export SHIM_FAIL_DUMP=miya_users
+  backup >/dev/null 2>&1 && fail 'expected failure'
+  assert_no_file "$SANDBOX/curl.log"
+}
+
+test_a_failed_heartbeat_does_not_fail_a_good_backup() {
+  fake_curl 7
+  output=$(backup 2>&1) || fail "backup should still succeed: $output"
+  assert_contains "$output" 'could not ping BACKUP_HEARTBEAT_URL'
+  assert_eq "$(grep -c BackupFailed "$SHIM_DIR/alerts.log")" 1
 }
 
 run_tests
