@@ -2,7 +2,11 @@
 # Test double for `docker compose ... exec -T <service> <command...>` as used
 # by the ops scripts. Records every call in $SHIM_DIR/docker.log.
 #   postgres pg_dump    -> prints "DUMP:<database>" (fails if SHIM_FAIL_DUMP=<database>)
-#   postgres pg_restore -> saves stdin to $SHIM_DIR/restored_<database>
+#   postgres pg_restore -> saves stdin to $SHIM_DIR/db_<database>, which must
+#                          exist (fails if SHIM_FAIL_RESTORE=<database>)
+#   postgres psql       -> applies CREATE/DROP/ALTER ... RENAME DATABASE
+#                          statements from stdin to the $SHIM_DIR/db_* files
+#                          and logs them to $SHIM_DIR/sql.log
 #   alertmanager        -> appends the call to $SHIM_DIR/alerts.log (fails if SHIM_FAIL_ALERT=1)
 set -euo pipefail
 printf '%s\n' "$*" >> "$SHIM_DIR/docker.log"
@@ -25,7 +29,31 @@ case "$service" in
         [ "${SHIM_FAIL_DUMP:-}" != "$database" ] || exit 1
         printf 'DUMP:%s' "$database"
         ;;
-      *pg_restore*) cat > "$SHIM_DIR/restored_$database" ;;
+      *pg_restore*)
+        [ -e "$SHIM_DIR/db_$database" ] || { echo "database $database does not exist" >&2; exit 1; }
+        [ "${SHIM_FAIL_RESTORE:-}" != "$database" ] || exit 1
+        cat > "$SHIM_DIR/db_$database"
+        ;;
+      *psql*)
+        while IFS= read -r sql; do
+          printf '%s\n' "$sql" >> "$SHIM_DIR/sql.log"
+          sql=${sql%;}
+          case "$sql" in
+            'DROP DATABASE IF EXISTS '*)
+              name=${sql#DROP DATABASE IF EXISTS }
+              rm -f "$SHIM_DIR/db_${name%% *}"
+              ;;
+            'CREATE DATABASE '*)
+              name=${sql#CREATE DATABASE }
+              : > "$SHIM_DIR/db_${name%% *}"
+              ;;
+            'ALTER DATABASE '*' RENAME TO '*)
+              from=${sql#ALTER DATABASE }
+              mv "$SHIM_DIR/db_${from%% *}" "$SHIM_DIR/db_${sql##* }"
+              ;;
+          esac
+        done
+        ;;
     esac
     ;;
   alertmanager)
