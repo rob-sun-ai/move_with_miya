@@ -5,8 +5,12 @@ distributor:
   receivers:
     otlp:
       protocols:
+        # Tempo 2.7 binds receivers to localhost by default; the collector
+        # reaches it over the Compose network.
         grpc:
+          endpoint: 0.0.0.0:4317
         http:
+          endpoint: 0.0.0.0:4318
 
 storage:
   trace:
