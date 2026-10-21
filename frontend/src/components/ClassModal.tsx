@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Avatar from '@mui/material/Avatar';
 import AvatarGroup from '@mui/material/AvatarGroup';
 import Dialog from '@mui/material/Dialog';
@@ -40,6 +40,18 @@ export default function ClassModal({
 }: ClassModalProps) {
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [message, setMessage] = useState('');
+
+  // Checkout leaves this page in its loading state; when the browser restores
+  // it from the back/forward cache, let the member try again.
+  useEffect(() => {
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) {
+        setStatus((current) => (current === 'loading' ? 'idle' : current));
+      }
+    };
+    window.addEventListener('pageshow', onPageShow);
+    return () => window.removeEventListener('pageshow', onPageShow);
+  }, []);
 
   const registered = isRegistered;
   const currentStatus =

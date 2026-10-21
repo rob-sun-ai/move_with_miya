@@ -82,6 +82,18 @@ export default function ClassDetailClient({
     };
   }, [user, cls.id]);
 
+  // Checkout leaves this page in its loading state; when the browser restores
+  // it from the back/forward cache, let the member try again.
+  useEffect(() => {
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) {
+        setStatus((current) => (current === 'loading' ? 'idle' : current));
+      }
+    };
+    window.addEventListener('pageshow', onPageShow);
+    return () => window.removeEventListener('pageshow', onPageShow);
+  }, []);
+
   const registerForClass = async () => {
     if (!user) return;
     setStatus('loading');

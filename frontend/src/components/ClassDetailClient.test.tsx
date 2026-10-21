@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from './test-utils';
@@ -10,6 +10,17 @@ import { startCheckout } from '@/lib/checkout';
 vi.mock('@/lib/checkout', () => ({ startCheckout: vi.fn() }));
 
 const freeYogaClass = { ...yogaClass, cost: '0' };
+
+/** Simulates the browser showing this page again (from bfcache if persisted). */
+function pageShow(persisted: boolean) {
+  act(() => {
+    window.dispatchEvent(
+      Object.assign(new Event('pageshow'), {
+        persisted,
+      }) as PageTransitionEvent,
+    );
+  });
+}
 
 const user: AuthUser = {
   id: 'user-1',
@@ -67,6 +78,25 @@ describe('ClassDetailClient', () => {
       await testUser.click(screen.getByRole('button', { name: 'Register' }));
 
       expect(await screen.findByText(message)).toBeInTheDocument();
+    });
+
+    it('lets the member retry after returning from Checkout via Back', async () => {
+      const testUser = userEvent.setup();
+      notRegisteredYet();
+      vi.mocked(startCheckout).mockReturnValue(new Promise(() => undefined));
+      render(<ClassDetailClient cls={yogaClass} user={member} />);
+
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Register' })).toBeEnabled(),
+      );
+      await testUser.click(screen.getByRole('button', { name: 'Register' }));
+      expect(screen.queryByRole('button', { name: 'Register' })).toBeNull();
+
+      pageShow(false);
+      expect(screen.queryByRole('button', { name: 'Register' })).toBeNull();
+
+      pageShow(true);
+      expect(screen.getByRole('button', { name: 'Register' })).toBeEnabled();
     });
   });
 
