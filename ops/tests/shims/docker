@@ -10,6 +10,10 @@
 #   alertmanager        -> appends the call to $SHIM_DIR/alerts.log (fails if SHIM_FAIL_ALERT=1)
 #   image inspect REF   -> succeeds only if REF is listed in $SHIM_IMAGES
 #   compose run JOB     -> fails if SHIM_FAIL_RUN=JOB
+#   compose up SVC...   -> appends each service Compose would start to
+#                          $SHIM_DIR/started.log: the listed services plus,
+#                          without --no-deps, their transitive depends_on in
+#                          docker-compose.prod.yml (migration jobs included)
 # The RELEASE_VERSION seen by each call goes to $SHIM_DIR/release.log.
 set -euo pipefail
 printf '%s\n' "$*" >> "$SHIM_DIR/docker.log"
@@ -21,6 +25,48 @@ fi
 case " $* " in
   *" run --rm ${SHIM_FAIL_RUN:-none} "*) exit 1 ;;
 esac
+
+# Prints "service dependency" pairs from the depends_on blocks of the
+# production compose file.
+compose_dependencies() {
+  awk '
+    /^services:/ { in_services = 1; next }
+    /^[^ #]/ { in_services = 0 }
+    !in_services { next }
+    /^  [A-Za-z0-9_-]+:/ { service = $1; sub(/:$/, "", service); in_deps = 0; next }
+    /^    depends_on:/ { in_deps = 1; next }
+    /^    [^ ]/ { in_deps = 0 }
+    in_deps && /^      - / { print service, $2; next }
+    in_deps && /^      [A-Za-z0-9_-]+:/ { dep = $1; sub(/:$/, "", dep); print service, dep }
+  ' docker-compose.prod.yml
+}
+args=("$@")
+for index in "${!args[@]}"; do
+  [ "${args[$index]}" = up ] || continue
+  no_deps=
+  pending=()
+  for arg in "${args[@]:$((index + 1))}"; do
+    case "$arg" in
+      --no-deps) no_deps=1 ;;
+      -*) ;;
+      *) pending+=("$arg") ;;
+    esac
+  done
+  started=' '
+  while [ "${#pending[@]}" -gt 0 ]; do
+    next=${pending[0]}
+    pending=("${pending[@]:1}")
+    case "$started" in *" $next "*) continue ;; esac
+    started="$started$next "
+    printf '%s\n' "$next" >> "$SHIM_DIR/started.log"
+    if [ -z "$no_deps" ]; then
+      while read -r service dependency; do
+        [ "$service" != "$next" ] || pending+=("$dependency")
+      done < <(compose_dependencies)
+    fi
+  done
+  exit 0
+done
 
 args=("$@")
 for index in "${!args[@]}"; do

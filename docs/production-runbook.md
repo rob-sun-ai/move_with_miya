@@ -147,9 +147,11 @@ The backup, restore, preflight, smoke, deploy, and rollback scripts are tested b
 ENV_FILE=/path/to/.env.production ./ops/deploy.sh
 ```
 
-The deployment runs the preflight checks, builds images tagged `move-with-miya/<service>:<git-sha>` for the checked-out commit, starts infrastructure, takes an encrypted backup, runs each Prisma migration as a one-shot job, starts application services, reloads nginx, starts the monitoring and alerting services, and performs public health checks. A failed backup or migration stops the rollout. `RELEASE_VERSION` is written back to the environment file only after the smoke checks pass.
+The deployment runs the preflight checks, builds images tagged `move-with-miya/<service>:<git-sha>` for the checked-out commit, starts infrastructure, takes an encrypted backup, runs each Prisma migration as a one-shot job, starts application services, reloads nginx, starts the monitoring and alerting services, and performs public health checks. A failed backup or migration stops the rollout. `RELEASE_VERSION` is written back to the environment file only after the smoke checks pass; if they fail, the new release keeps serving and the script prints the `rollback.sh` command for the previously recorded release. The deploy refuses to run from a checkout with uncommitted changes to tracked files (the images would not match the commit they are tagged with), and only one deploy or rollback runs on a host at a time (a `flock` on `.git/move-with-miya-deploy.lock`).
 
-The manual GitHub Actions workflow requires environment-scoped `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_PATH`, `DEPLOY_ENV_FILE`, `DEPLOY_SSH_KEY`, and `DEPLOY_KNOWN_HOSTS` secrets. It supports both deploy and application rollback operations.
+Deploys are **not zero-downtime**: containers are replaced in place, so requests fail for the seconds between a service being stopped and its replacement passing its healthcheck, plus the nginx reload. Deploy at a quiet time.
+
+The manual GitHub Actions workflow requires environment-scoped `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_PATH`, `DEPLOY_ENV_FILE`, `DEPLOY_SSH_KEY`, and `DEPLOY_KNOWN_HOSTS` secrets. It supports both deploy and application rollback operations, validates the operation and the 40-character SHA before connecting to the host, and runs one operation per environment at a time (later runs queue).
 
 ## Rollback
 
@@ -157,7 +159,7 @@ The manual GitHub Actions workflow requires environment-scoped `DEPLOY_HOST`, `D
 ROLLBACK_VERSION=<previous-sha> ENV_FILE=/path/to/.env.production ./ops/rollback.sh
 ```
 
-Rollback restarts the application services on the images previously built on this host for `<previous-sha>`; it fails if those images are not present (deploy that commit instead). Database migrations are not automatically reversed, and rollback does not run the older release's migration jobs. For an incompatible schema change, restore the pre-deploy backup (see "Recovering production").
+Rollback restarts the application services on the images previously built on this host for `<previous-sha>`; it fails if those images are not present (deploy that commit instead). It waits for them to be healthy, then reloads nginx and runs the smoke checks. Only the images change: the compose file, nginx config, and ops scripts of the current checkout stay in use, so if the newer release changed `docker-compose.prod.yml` (new required variables, renamed services) or the nginx config, check that they still work with the older images, or check out `<previous-sha>` and run `deploy.sh` instead. Like a deploy, a rollback briefly interrupts service. Database migrations are not automatically reversed, and rollback does not run the older release's migration jobs. For an incompatible schema change, restore the pre-deploy backup (see "Recovering production").
 
 ## Authenticated smoke checklist
 

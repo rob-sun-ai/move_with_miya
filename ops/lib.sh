@@ -79,10 +79,25 @@ assert_git_sha() {
 }
 
 # nginx resolves upstream hostnames once at startup, so reload it after
-# application containers are recreated with new addresses.
+# application containers are recreated with new addresses. --no-deps: the
+# callers have already started (and health-checked) the services nginx
+# depends on; without it Compose would also re-run their migration jobs,
+# which during a rollback means the older release's migrations.
 reload_nginx() {
-  compose up -d nginx
+  compose up -d --no-deps nginx
   compose exec -T nginx nginx -s reload
+}
+
+# Holds an exclusive lock for the rest of the calling script, so deploys and
+# rollbacks on this host never overlap. The lock is released on exit.
+acquire_deploy_lock() {
+  require_command flock
+  lock_file=${DEPLOY_LOCK_FILE:-$(git rev-parse --git-path move-with-miya-deploy.lock)}
+  exec 9> "$lock_file"
+  flock -n 9 || {
+    echo "Another deploy or rollback is running on this host (lock: $lock_file)" >&2
+    exit 1
+  }
 }
 
 # Records the running release in the env file so later compose commands and

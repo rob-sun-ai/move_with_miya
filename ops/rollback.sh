@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 . ./ops/lib.sh
+acquire_deploy_lock
 
 load_env
 assert_git_sha ROLLBACK_VERSION "${ROLLBACK_VERSION:-}"
@@ -18,9 +19,10 @@ for service in $services; do
 done
 
 # --no-deps: do not run the older release's migration jobs against the
-# already-migrated databases.
+# already-migrated databases. --wait: only reload nginx once they are healthy.
+# This keeps the current checkout's compose file and nginx config.
 # shellcheck disable=SC2086
-compose up -d --no-build --no-deps $services
+compose up -d --wait --no-build --no-deps $services
 reload_nginx
 ./ops/smoke-test.sh "${PUBLIC_APP_URL:?PUBLIC_APP_URL is required}"
 persist_release_version "$RELEASE_VERSION"

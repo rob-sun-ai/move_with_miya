@@ -134,8 +134,29 @@ RELEASE_VERSION=abc'
 test_reload_nginx_starts_then_reloads_it() {
   (. ./ops/lib.sh && reload_nginx)
   prefix="compose --env-file $ENV_FILE -f docker-compose.prod.yml"
-  assert_eq "$(cat "$SHIM_DIR/docker.log")" "$prefix up -d nginx
+  assert_eq "$(cat "$SHIM_DIR/docker.log")" "$prefix up -d --no-deps nginx
 $prefix exec -T nginx nginx -s reload"
+}
+
+test_reload_nginx_does_not_start_its_dependencies_or_migrations() {
+  (. ./ops/lib.sh && reload_nginx)
+  assert_eq "$(cat "$SHIM_DIR/started.log")" nginx
+}
+
+test_acquire_deploy_lock_refuses_while_another_run_holds_it() {
+  export DEPLOY_LOCK_FILE="$SANDBOX/deploy.lock"
+  exec 8> "$DEPLOY_LOCK_FILE"
+  flock -n 8 || fail 'could not take the lock in the test'
+  output=$( (. ./ops/lib.sh && acquire_deploy_lock) 2>&1) && fail 'expected failure'
+  assert_contains "$output" 'Another deploy or rollback is running on this host'
+  exec 8>&-
+  (. ./ops/lib.sh && acquire_deploy_lock) || fail 'lock should be free again'
+}
+
+test_acquire_deploy_lock_is_released_when_the_script_exits() {
+  export DEPLOY_LOCK_FILE="$SANDBOX/deploy.lock"
+  (. ./ops/lib.sh && acquire_deploy_lock) || fail 'first run should get the lock'
+  (. ./ops/lib.sh && acquire_deploy_lock) || fail 'second run should get the lock'
 }
 
 run_tests

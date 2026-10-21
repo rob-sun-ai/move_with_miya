@@ -15,6 +15,7 @@ setup_sandbox() {
   : > "$SHIM_DIR/alerts.log"
   : > "$SHIM_DIR/curl.log"
   : > "$SHIM_DIR/release.log"
+  : > "$SHIM_DIR/started.log"
   export PATH="$ROOT/ops/tests/shims:$PATH"
   age-keygen -o "$SANDBOX/key.txt" 2>/dev/null
   AGE_PUBLIC_KEY=$(age-keygen -y "$SANDBOX/key.txt")
@@ -77,7 +78,9 @@ assert_no_file() { [ ! -e "$1" ] || fail "unexpected file $1"; }
 run_tests() {
   local passed=0 failed=0 name output
   for name in $(declare -F | awk '{ print $3 }' | grep '^test_'); do
-    if output=$( (setup_sandbox && "$name") 2>&1 ); then
+    # A test file may define setup_test for extra per-test setup.
+    if output=$( (setup_sandbox && { ! declare -F setup_test >/dev/null || setup_test; } \
+      && "$name") 2>&1 ); then
       echo "ok   ${name#test_}"
       passed=$((passed + 1))
     else
