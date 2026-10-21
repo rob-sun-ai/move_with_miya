@@ -20,10 +20,15 @@ export class CheckoutRateLimitGuard implements CanActivate {
     const http = context.switchToHttp();
     const request = http.getRequest<Request>();
     const response = http.getResponse<Response>();
-    const route = request.path || 'checkout';
+    const path = request.path || 'checkout';
+    const isRefund = path.endsWith('/refund');
+    // The success page polls this read-only, member-scoped lookup while it
+    // waits for the webhook, so it gets its own generous per-IP bucket.
+    const isStatus = path.endsWith('/status');
+    // Refund paths contain the payment id; limit per admin, not per payment.
+    const route = isRefund ? '/checkout/payments/refund' : path;
     const ip = request.ip || request.socket.remoteAddress || 'unknown';
     const userId = request.session?.userId;
-    const isRefund = route.endsWith('/refund');
 
     let ipDecision: CheckoutRateLimitDecision;
     let userDecision: CheckoutRateLimitDecision | undefined;
@@ -31,8 +36,10 @@ export class CheckoutRateLimitGuard implements CanActivate {
       [ipDecision, userDecision] = await Promise.all([
         isRefund
           ? this.rateLimitService.consumeRefundIp(route, ip)
-          : this.rateLimitService.consumeIp(route, ip),
-        userId
+          : isStatus
+            ? this.rateLimitService.consumeStatusIp(route, ip)
+            : this.rateLimitService.consumeIp(route, ip),
+        userId && !isStatus
           ? this.rateLimitService.consumeUser(route, userId)
           : Promise.resolve(undefined),
       ]);

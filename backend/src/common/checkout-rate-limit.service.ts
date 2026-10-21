@@ -41,7 +41,7 @@ export class CheckoutRateLimitService {
     return this.consume(
       'user',
       `${route}:${userId || 'anonymous'}`,
-      this.getPositiveInteger('CHECKOUT_USER_ATTEMPT_LIMIT', 10),
+      this.getPositiveInteger('CHECKOUT_USER_ATTEMPT_LIMIT', 20),
       this.getPositiveInteger('CHECKOUT_USER_ATTEMPT_TTL_MS', 10 * 60 * 1000),
     );
   }
@@ -55,6 +55,18 @@ export class CheckoutRateLimitService {
       `${route}:${ip || 'unknown'}`,
       this.getPositiveInteger('CHECKOUT_REFUND_ATTEMPT_LIMIT', 30),
       this.getPositiveInteger('CHECKOUT_REFUND_ATTEMPT_TTL_MS', 10 * 60 * 1000),
+    );
+  }
+
+  consumeStatusIp(
+    route: string,
+    ip: string,
+  ): Promise<CheckoutRateLimitDecision> {
+    return this.consume(
+      'status-ip',
+      `${route}:${ip || 'unknown'}`,
+      this.getPositiveInteger('CHECKOUT_STATUS_ATTEMPT_LIMIT', 120),
+      this.getPositiveInteger('CHECKOUT_STATUS_ATTEMPT_TTL_MS', 10 * 60 * 1000),
     );
   }
 

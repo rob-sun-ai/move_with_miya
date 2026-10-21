@@ -64,6 +64,24 @@ describe('CheckoutRateLimitService', () => {
     expect(command[4]).toBe('30000');
   });
 
+  it('uses the status limits for status lookups', async () => {
+    const service = new CheckoutRateLimitService(
+      redis,
+      new ConfigService({
+        SESSION_SECRET: 'test-secret',
+        CHECKOUT_STATUS_ATTEMPT_LIMIT: '50',
+        CHECKOUT_STATUS_ATTEMPT_TTL_MS: '30000',
+      }),
+    );
+
+    await expect(
+      service.consumeStatusIp('/checkout/status', ''),
+    ).resolves.toMatchObject({ allowed: true, limit: 50, remaining: 49 });
+    const [command] = sendCommand.mock.calls[0] as [string[]];
+    expect(command[3]).toMatch(/^checkout-rate-limit:status-ip:[0-9a-f]{64}$/);
+    expect(command[4]).toBe('30000');
+  });
+
   it('never stores the raw IP or user id in Redis keys', async () => {
     const service = new CheckoutRateLimitService(redis, config);
     await service.consumeIp('/checkout/status', '198.51.100.1');
@@ -116,7 +134,10 @@ describe('CheckoutRateLimitService', () => {
     ).resolves.toMatchObject({ limit: 30 });
     await expect(
       service.consumeUser('/checkout/create-session', 'user-1'),
-    ).resolves.toMatchObject({ limit: 10 });
+    ).resolves.toMatchObject({ limit: 20 });
+    await expect(
+      service.consumeStatusIp('/checkout/status', '198.51.100.1'),
+    ).resolves.toMatchObject({ limit: 120 });
     expect((sendCommand.mock.calls[0] as [string[]])[0][4]).toBe('600000');
   });
 

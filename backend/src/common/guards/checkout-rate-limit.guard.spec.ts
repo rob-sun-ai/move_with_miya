@@ -39,6 +39,7 @@ describe('CheckoutRateLimitGuard', () => {
       consumeIp,
       consumeUser,
       consumeRefundIp: jest.fn().mockResolvedValue(decision),
+      consumeStatusIp: jest.fn().mockResolvedValue(decision),
       applyHeaders: jest.fn(),
     } as unknown as CheckoutRateLimitService;
     const guard = new CheckoutRateLimitGuard(service);
@@ -63,6 +64,7 @@ describe('CheckoutRateLimitGuard', () => {
       consumeIp,
       consumeUser: jest.fn().mockResolvedValue(decision),
       consumeRefundIp: jest.fn().mockResolvedValue(decision),
+      consumeStatusIp: jest.fn().mockResolvedValue(decision),
       applyHeaders: jest.fn(),
     } as unknown as CheckoutRateLimitService;
     const guard = new CheckoutRateLimitGuard(service);
@@ -80,6 +82,7 @@ describe('CheckoutRateLimitGuard', () => {
       consumeIp,
       consumeUser,
       consumeRefundIp: jest.fn().mockResolvedValue(decision),
+      consumeStatusIp: jest.fn().mockResolvedValue(decision),
       applyHeaders: jest.fn(),
     } as unknown as CheckoutRateLimitService;
     const guard = new CheckoutRateLimitGuard(service);
@@ -98,6 +101,7 @@ describe('CheckoutRateLimitGuard', () => {
       consumeIp: jest.fn().mockResolvedValue(decision),
       consumeUser: jest.fn().mockResolvedValue(decision),
       consumeRefundIp: jest.fn().mockResolvedValue(decision),
+      consumeStatusIp: jest.fn().mockResolvedValue(decision),
       applyHeaders: jest.fn(),
       ...overrides,
     };
@@ -118,8 +122,12 @@ describe('CheckoutRateLimitGuard', () => {
 
     await expect(guard.canActivate(executionContext)).resolves.toBe(true);
     expect(service.consumeRefundIp).toHaveBeenCalledWith(
-      '/checkout/payments/p1/refund',
+      '/checkout/payments/refund',
       '198.51.100.1',
+    );
+    expect(service.consumeUser).toHaveBeenCalledWith(
+      '/checkout/payments/refund',
+      'user-1',
     );
     expect(service.consumeIp).not.toHaveBeenCalled();
     expect(service.applyHeaders).toHaveBeenCalledWith(response, decision, 'IP');
@@ -128,6 +136,33 @@ describe('CheckoutRateLimitGuard', () => {
       decision,
       'User',
     );
+  });
+
+  it('limits refunds per admin across payments', async () => {
+    const service = serviceWith();
+    const guard = guardFor(service);
+
+    await guard.canActivate(context('/checkout/payments/p1/refund').context);
+    await guard.canActivate(context('/checkout/payments/p2/refund').context);
+
+    const [first, second] = service.consumeUser.mock.calls as unknown[][];
+    expect(second).toEqual(first);
+  });
+
+  it('gives status lookups their own IP bucket and no member limit', async () => {
+    const service = serviceWith();
+    const guard = guardFor(service);
+    const { context: executionContext, response } = context('/checkout/status');
+
+    await expect(guard.canActivate(executionContext)).resolves.toBe(true);
+    expect(service.consumeStatusIp).toHaveBeenCalledWith(
+      '/checkout/status',
+      '198.51.100.1',
+    );
+    expect(service.consumeIp).not.toHaveBeenCalled();
+    expect(service.consumeUser).not.toHaveBeenCalled();
+    expect(service.applyHeaders).toHaveBeenCalledTimes(1);
+    expect(service.applyHeaders).toHaveBeenCalledWith(response, decision, 'IP');
   });
 
   it('blocks when the member bucket is exhausted', async () => {
