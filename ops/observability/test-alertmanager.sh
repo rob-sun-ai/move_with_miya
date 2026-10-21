@@ -42,6 +42,20 @@ check 'the Resend key is not in the config' 0 \
   "$(in_container "grep -c -- '$RESEND_API_KEY' /tmp/alertmanager.yml || true")"
 check 'the rendered config is valid' 0 \
   "$(in_container 'amtool check-config /tmp/alertmanager.yml >/dev/null; echo $?')"
+check 'the Watchdog heartbeat never emails' heartbeat \
+  "$(in_container 'amtool config routes test --config.file=/tmp/alertmanager.yml alertname=Watchdog')"
+render_tricky="ALERT_EMAIL_FROM=\"O'Brien & Co <alerts@example.test>\" \
+  ALERT_HEARTBEAT_URL='https://hc.example.test/ping?a=1&b=2' \
+  ALERTMANAGER_CONFIG=/tmp/tricky.yml \
+  sh /etc/alertmanager/alertmanager-entrypoint.sh --render-only"
+check 'quotes and ampersands render literally' \
+  "  smtp_from: 'O''Brien & Co <alerts@example.test>'" \
+  "$(in_container "$render_tricky && grep smtp_from /tmp/tricky.yml")"
+check 'the heartbeat URL renders as a webhook' \
+  "      - url: 'https://hc.example.test/ping?a=1&b=2'" \
+  "$(in_container "grep -- '- url:' /tmp/tricky.yml")"
+check 'the tricky config is valid' 0 \
+  "$(in_container 'amtool check-config /tmp/tricky.yml >/dev/null; echo $?')"
 in_container "amtool alert add CiTestAlert severity=warning \
   --annotation='summary=\"CI test\"' --alertmanager.url=http://localhost:9093" >/dev/null 2>&1
 check 'alerts are accepted' CiTestAlert \

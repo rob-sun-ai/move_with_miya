@@ -1,6 +1,14 @@
 groups:
   - name: move-with-miya
     rules:
+      # Always fires. Alertmanager routes it to ALERT_HEARTBEAT_URL, a dead
+      # man's switch that raises the alarm if Prometheus or Alertmanager stops.
+      - alert: Watchdog
+        expr: vector(1)
+        labels:
+          severity: none
+        annotations:
+          summary: 'Alerting pipeline heartbeat (always firing)'
       - alert: ServiceDown
         expr: up{job=~"backend|user-service|classes-service|registration-service"} == 0
         for: 2m

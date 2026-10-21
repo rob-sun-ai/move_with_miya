@@ -202,3 +202,4 @@ Production checklist:
 - [ ] Verify `POSTGRES_PASSWORD` and `RABBITMQ_PASS` are unique, strong, URL-safe credentials (they are embedded in connection URLs) before exposing the stack publicly.
 - [ ] Confirm the admin Observability tab is available and non-admin requests receive `403`.
 - [ ] Send a test alert (see the runbook) and confirm it arrives at `ALERT_EMAIL_TO`.
+- [ ] Point `ALERT_HEARTBEAT_URL` at a dead man's switch and confirm it receives the `Watchdog` heartbeat.

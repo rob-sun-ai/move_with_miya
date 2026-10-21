@@ -61,11 +61,16 @@ Prometheus evaluates [ops/observability/alerts.yml](../ops/observability/alerts.
 
 | Alert | Fires when | Response |
 |---|---|---|
+| `Watchdog` | Always (it is a heartbeat, never emailed) | If the dead man's switch at `ALERT_HEARTBEAT_URL` reports missing pings, Prometheus or Alertmanager is down or cannot send |
 | `ServiceDown` | A service's metrics endpoint is unreachable for 2 minutes | Check `docker compose ps` and the service logs |
-| `HighHttpErrorRate` | More than 5% of requests return 5xx for 5 minutes (with at least 5 requests in the window) | Check logs in Grafana/Loki by `requestId` |
-| `HighHttpLatency` | p95 latency is above 1 second for 10 minutes | Check dependency health and traces in Tempo |
+| `HighHttpErrorRate` | More than 5% of requests return 5xx for 5 minutes (with at least 5 requests in the window; `/metrics` and `/health/*` probes are excluded) | Check logs in Grafana/Loki by `requestId` |
+| `HighHttpLatency` | p95 latency, excluding probes, is above 1 second for 10 minutes | Check dependency health and traces in Tempo |
 | `RefundsNeedAttention` | A refund exhausted its 10 automatic retries | Admin → Payments: read the error, then retry or resolve it in Stripe |
 | `StripeWebhookProcessingFailed` | A Stripe webhook event failed processing for 15 minutes | Fix the cause from the backend logs; Stripe retries for 3 days, after that resend the event from the Stripe dashboard |
+
+Without a heartbeat nothing reports a stopped Prometheus or Alertmanager, so set `ALERT_HEARTBEAT_URL` to an external dead man's switch, for example a [healthchecks.io](https://healthchecks.io) check with a 5-minute period and a 10-minute grace time. Alertmanager pings it with the always-firing `Watchdog` alert every 5 minutes, and the service alerts you when the pings stop. Leaving it empty discards the heartbeat.
+
+Links in alert emails use `ALERTMANAGER_EXTERNAL_URL` (default `http://localhost:9093`, which works through an SSH tunnel to the Alertmanager container). Recipient and sender values are substituted literally, so quotes and `&` in `RESEND_FROM_EMAIL` are safe; they must fit on one line.
 
 Send a test alert after every change to the alerting setup:
 

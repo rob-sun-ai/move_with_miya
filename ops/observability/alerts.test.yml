@@ -5,6 +5,17 @@ rule_files:
 evaluation_interval: 1m
 
 tests:
+  - name: Watchdog always fires
+    interval: 1m
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: Watchdog
+        exp_alerts:
+          - exp_labels:
+              severity: none
+            exp_annotations:
+              summary: 'Alerting pipeline heartbeat (always firing)'
+
   - name: ServiceDown fires for a service whose metrics stay unreachable
     interval: 1m
     input_series:
