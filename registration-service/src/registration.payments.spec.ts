@@ -34,6 +34,7 @@ function createPrisma() {
     },
     outboxEvent: { create: jest.fn().mockResolvedValue({}) },
     $transaction: jest.fn(),
+    $queryRaw: jest.fn(),
   };
   prisma.$transaction.mockImplementation(
     (callback: (tx: typeof prisma) => unknown) => callback(prisma),
@@ -1126,14 +1127,17 @@ describe('RegistrationService payments', () => {
       'after %p failures, records attempt %p and retries at %s',
       async (previous, attempts, retryAt) => {
         prisma.payment.findUnique.mockResolvedValue({
+          refundStatus: 'Pending',
           refundAttempts: previous,
         });
 
         await service.failPaymentRefund('payment-1', 'card_declined');
 
+        expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
+          isolationLevel: 'Serializable',
+        });
         expect(prisma.payment.findUnique).toHaveBeenCalledWith({
           where: { id: 'payment-1' },
-          select: { refundAttempts: true },
         });
         expect(prisma.payment.update).toHaveBeenCalledWith({
           where: { id: 'payment-1' },
@@ -1161,6 +1165,37 @@ describe('RegistrationService payments', () => {
       );
     });
 
+    it('never turns a succeeded refund back into a failure', async () => {
+      const succeeded = paymentRecord({
+        status: 'Refunded',
+        refundStatus: 'Succeeded',
+        refundAttempts: 2,
+      });
+      prisma.payment.findUnique.mockResolvedValue(succeeded);
+
+      await expect(
+        service.failPaymentRefund('payment-1', 'late refund.failed'),
+      ).resolves.toBe(succeeded);
+      expect(prisma.payment.update).not.toHaveBeenCalled();
+    });
+
+    it('retries a failure report that conflicts with a concurrent one', async () => {
+      prisma.$transaction.mockRejectedValueOnce({ code: 'P2034' });
+      prisma.payment.findUnique.mockResolvedValue({
+        refundStatus: 'Failed',
+        refundAttempts: 4,
+      });
+
+      await service.failPaymentRefund('payment-1', 'declined');
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+      expect(prisma.payment.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ refundAttempts: 5 }) as unknown,
+        }),
+      );
+    });
+
     it('rejects a failure report for an unknown payment', async () => {
       prisma.payment.findUnique.mockResolvedValue(null);
 
@@ -1182,28 +1217,31 @@ describe('RegistrationService payments', () => {
       });
     });
 
-    it('ignores a failure report for a refund that is not in flight', async () => {
-      prisma.payment.findUnique.mockResolvedValue({
-        id: 'payment-1',
-        refundStatus: 'Succeeded',
-      });
-      await service.failPaymentRefund('payment-1', 'late');
+    it('claims due refunds under the attempt cap with a lease', async () => {
+      const claimed = [paymentRecord({ refundStatus: 'Pending' })];
+      prisma.$queryRaw.mockResolvedValue(claimed);
 
-      expect(prisma.payment.update).not.toHaveBeenCalled();
-    });
+      await expect(service.listRefundPendingPayments()).resolves.toBe(claimed);
 
-    it('lists only due refunds under the attempt cap, soonest first', async () => {
-      await service.listRefundPendingPayments();
-
-      expect(prisma.payment.findMany).toHaveBeenCalledWith({
-        where: {
-          refundStatus: { in: ['Pending', 'Failed'] },
-          refundAvailableAt: { lte: at('2026-09-27T12:00:00.000Z') },
-          refundAttempts: { lt: MAX_REFUND_ATTEMPTS },
-        },
-        orderBy: { refundAvailableAt: 'asc' },
-        take: 100,
-      });
+      const [strings, ...values] = prisma.$queryRaw.mock.calls[0] as [
+        TemplateStringsArray,
+        ...unknown[],
+      ];
+      const sql = strings.join('?').replace(/\s+/g, ' ');
+      expect(sql).toContain(`"refundStatus" IN ('Pending', 'Failed')`);
+      expect(sql).toContain('"refundAvailableAt" <= ?');
+      expect(sql).toContain('"refundAttempts" < ?');
+      expect(sql).toContain(
+        'ORDER BY "refundAvailableAt" ASC LIMIT 100 FOR UPDATE SKIP LOCKED',
+      );
+      expect(sql).toContain('SET "refundAvailableAt" = ?');
+      expect(sql).toContain('RETURNING p.*');
+      expect(values).toEqual([
+        at('2026-09-27T12:00:00.000Z'),
+        MAX_REFUND_ATTEMPTS,
+        at('2026-09-27T12:15:00.000Z'),
+      ]);
+      expect(prisma.payment.findMany).not.toHaveBeenCalled();
     });
 
     it('flags only failed refunds that used up their attempts', async () => {

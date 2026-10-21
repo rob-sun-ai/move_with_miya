@@ -775,8 +775,9 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Retries refunds that are due. The registration service applies backoff
-   * and an attempt cap; the lock keeps concurrent backend instances from
-   * sweeping the same payments.
+   * and an attempt cap, and leases the refunds it hands out so concurrent
+   * sweeps never retry the same payment; the lock only keeps backend
+   * instances from all sweeping every interval.
    */
   async retryRefunds() {
     if (this.sweeping) return;

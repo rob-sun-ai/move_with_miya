@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { RpcException } from '@nestjs/microservices';
+import type { Payment } from './generated/prisma/client';
 import { PrismaService } from './prisma/prisma.service';
 
 class RpcError extends RpcException {
@@ -95,6 +96,12 @@ export const REFUND_NEEDS_ATTENTION_WHERE = {
   refundStatus: 'Failed' as const,
   refundAttempts: { gte: MAX_REFUND_ATTEMPTS },
 };
+
+/**
+ * How long a refund sweep owns the refunds it claimed. Long enough for one
+ * sweep to finish; a crashed sweeper's claims become due again afterwards.
+ */
+const REFUND_CLAIM_LEASE_MS = 15 * 60_000;
 
 /** Exponential backoff between refund retries: 2, 4, … 256 minutes. */
 function refundRetryDelayMs(attempts: number) {
@@ -715,6 +722,8 @@ export class RegistrationService {
 
   async failPaymentRefund(paymentId: string, error: string) {
     assertKey(paymentId, 'Payment');
+    // Serializable so concurrent failure reports each count an attempt and a
+    // refund completed meanwhile is seen rather than overwritten.
     return this.runSerializable(async (tx) => {
       const payment = await tx.payment.findUnique({
         where: { id: paymentId },
@@ -738,16 +747,31 @@ export class RegistrationService {
     });
   }
 
+  /**
+   * Claims the 100 soonest-due refunds for one sweep. Each claimed row is
+   * leased by pushing `refundAvailableAt` forward, and rows another sweeper
+   * is claiming are skipped, so concurrent sweeps never share a row. The
+   * sweep's outcome (or the lease expiring) decides the next attempt.
+   */
   listRefundPendingPayments() {
-    return this.prisma.client.payment.findMany({
-      where: {
-        refundStatus: { in: ['Pending', 'Failed'] },
-        refundAvailableAt: { lte: new Date() },
-        refundAttempts: { lt: MAX_REFUND_ATTEMPTS },
-      },
-      orderBy: { refundAvailableAt: 'asc' },
-      take: 100,
-    });
+    const now = new Date();
+    const leasedUntil = new Date(now.getTime() + REFUND_CLAIM_LEASE_MS);
+    return this.prisma.client.$queryRaw<Payment[]>`
+      WITH due AS (
+        SELECT "id"
+        FROM "Payment"
+        WHERE "refundStatus" IN ('Pending', 'Failed')
+          AND "refundAvailableAt" <= ${now}
+          AND "refundAttempts" < ${MAX_REFUND_ATTEMPTS}
+        ORDER BY "refundAvailableAt" ASC
+        LIMIT 100
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE "Payment" AS p
+      SET "refundAvailableAt" = ${leasedUntil}
+      FROM due
+      WHERE p."id" = due."id"
+      RETURNING p.*`;
   }
 
   async getAllPayments() {
