@@ -707,21 +707,12 @@ describe('RegistrationService payments', () => {
   });
 
   describe('payment failure and expiry', () => {
-    it('fails only pending payments and truncates the error', async () => {
-      await service.markPaymentFailed('payment-1', 'x'.repeat(600));
-
-      expect(prisma.payment.updateMany).toHaveBeenCalledWith({
-        where: { id: 'payment-1', status: 'Pending' },
-        data: { refundError: 'x'.repeat(500), status: 'Failed' },
-      });
-    });
-
-    it('fails a payment without an error message', async () => {
+    it('fails only pending payments without recording a refund error', async () => {
       await service.markPaymentFailed('payment-1');
 
       expect(prisma.payment.updateMany).toHaveBeenCalledWith({
         where: { id: 'payment-1', status: 'Pending' },
-        data: { refundError: undefined, status: 'Failed' },
+        data: { status: 'Failed' },
       });
     });
 

@@ -123,7 +123,7 @@ export class RegistrationController {
 
   @MessagePattern({ cmd: 'mark_payment_failed' })
   markPaymentFailed(data: { id: string; error?: string }) {
-    return this.registrationService.markPaymentFailed(data.id, data.error);
+    return this.registrationService.markPaymentFailed(data.id);
   }
 
   @MessagePattern({ cmd: 'mark_payment_expired' })

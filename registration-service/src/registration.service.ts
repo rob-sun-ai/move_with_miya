@@ -546,13 +546,12 @@ export class RegistrationService {
     });
   }
 
-  markPaymentFailed(id: string, error?: string) {
+  // A checkout failure is not a refund error, so it is not stored in
+  // refundError where admin views would report it as one.
+  markPaymentFailed(id: string) {
     return this.prisma.client.payment.updateMany({
       where: { id, status: 'Pending' },
-      data: {
-        refundError: error?.slice(0, 500),
-        status: 'Failed',
-      },
+      data: { status: 'Failed' },
     });
   }
 
