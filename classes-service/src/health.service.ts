@@ -2,6 +2,30 @@ import { Injectable } from '@nestjs/common';
 import { connect } from 'amqplib';
 import { PrismaService } from './prisma/prisma.service';
 
+/** Upper bound for each dependency check, so a hung dependency fails fast. */
+export const CHECK_TIMEOUT_MS = 2_000;
+
+/** Rejects when `check` has not settled within `ms`. */
+export async function withTimeout<T>(
+  check: Promise<T>,
+  ms = CHECK_TIMEOUT_MS,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      check,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Timed out after ${ms} ms`)),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 @Injectable()
 export class HealthService {
   private readonly readinessCacheTtlMs = 5_000;
@@ -37,10 +61,11 @@ export class HealthService {
   }
 
   private async checkReadiness() {
-    const dependencies = {
-      postgres: await this.postgres(),
-      rabbitmq: await this.rabbitmq(),
-    };
+    const [postgres, rabbitmq] = await Promise.all([
+      this.postgres(),
+      this.rabbitmq(),
+    ]);
+    const dependencies = { postgres, rabbitmq };
     return {
       status: Object.values(dependencies).every((value) => value === 'ok')
         ? 'ok'
@@ -52,7 +77,7 @@ export class HealthService {
   }
   private async postgres(): Promise<'ok' | 'error'> {
     try {
-      await this.prisma.client.$queryRaw`SELECT 1`;
+      await withTimeout(this.prisma.client.$queryRaw`SELECT 1`);
       return 'ok';
     } catch {
       return 'error';
@@ -61,11 +86,16 @@ export class HealthService {
   private async rabbitmq(): Promise<'ok' | 'error'> {
     const url = process.env.RABBITMQ_URL;
     if (!url) return 'error';
+    const connecting = connect(url, { timeout: CHECK_TIMEOUT_MS });
     try {
-      const connection = await connect(url);
-      await connection.close();
+      const connection = await withTimeout(connecting);
+      await withTimeout(connection.close());
       return 'ok';
     } catch {
+      // Close a connection that only opened after the check gave up on it.
+      void connecting
+        .then((connection) => connection.close())
+        .catch(() => undefined);
       return 'error';
     }
   }

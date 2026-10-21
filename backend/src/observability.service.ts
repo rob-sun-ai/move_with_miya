@@ -1,6 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { HealthService } from './health.service';
+import {
+  HealthService,
+  type HealthResult,
+  withTimeout,
+} from './health.service';
+
+/** Bounds the local readiness check and each downstream probe. */
+const SUMMARY_TIMEOUT_MS = 3_000;
 
 interface ServiceStatus {
   status: 'ok' | 'error';
@@ -15,7 +22,7 @@ export class ObservabilityService {
   ) {}
 
   async summary() {
-    const localHealth = await this.health.ready();
+    const localHealth = this.localHealth();
     const urls = {
       'user-service': this.config.get<string>(
         'USER_HEALTH_URL',
@@ -39,6 +46,8 @@ export class ObservabilityService {
       ),
     ) as Record<string, ServiceStatus>;
 
+    const backend = await localHealth;
+
     let grafanaUrl: string | null = null;
     const configuredGrafanaUrl = this.config.get<string>('GRAFANA_PUBLIC_URL');
     if (configuredGrafanaUrl) {
@@ -55,9 +64,9 @@ export class ObservabilityService {
       version: this.config.get<string>('RELEASE_VERSION', 'development'),
       services: {
         backend: {
-          status: localHealth.status,
+          status: backend.status,
           responseTimeMs: 0,
-          dependencies: localHealth.dependencies,
+          dependencies: backend.dependencies,
         },
         ...services,
       },
@@ -65,11 +74,21 @@ export class ObservabilityService {
     };
   }
 
+  private async localHealth(): Promise<
+    Pick<HealthResult, 'status' | 'dependencies'>
+  > {
+    try {
+      return await withTimeout(this.health.ready(), SUMMARY_TIMEOUT_MS);
+    } catch {
+      return { status: 'error' };
+    }
+  }
+
   private async checkHttp(url: string): Promise<ServiceStatus> {
     const started = Date.now();
     try {
       const response = await fetch(url, {
-        signal: AbortSignal.timeout(3000),
+        signal: AbortSignal.timeout(SUMMARY_TIMEOUT_MS),
       });
       return {
         status: response.ok ? 'ok' : 'error',

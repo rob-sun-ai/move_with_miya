@@ -106,6 +106,21 @@ describe('ObservabilityService', () => {
     });
   });
 
+  it('reports the gateway as down when its readiness check hangs', async () => {
+    ready.mockReturnValue(new Promise(() => undefined));
+    jest.spyOn(global, 'fetch').mockResolvedValue(new Response('{}'));
+
+    const summary = service().summary();
+    await jest.advanceTimersByTimeAsync(3_000);
+
+    await expect(summary).resolves.toMatchObject({
+      services: {
+        backend: { status: 'error', responseTimeMs: 0 },
+        'user-service': { status: 'ok' },
+      },
+    });
+  });
+
   it.each([
     ['https://grafana.studio.test/d/abc', 'https://grafana.studio.test/d/abc'],
     ['http://grafana.studio.test', null],

@@ -55,7 +55,9 @@ describe('HealthService', () => {
       timestamp: '2026-09-27T12:00:00.000Z',
       dependencies: { redis: 'ok', rabbitmq: 'ok' },
     });
-    expect(connectMock).toHaveBeenCalledWith('amqp://rabbit');
+    expect(connectMock).toHaveBeenCalledWith('amqp://rabbit', {
+      timeout: 2_000,
+    });
     expect(close).toHaveBeenCalled();
   });
 
@@ -105,5 +107,47 @@ describe('HealthService', () => {
     expect(first).toBe(second);
     expect(ping).toHaveBeenCalledTimes(1);
     expect(connectMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a Redis check that never answers as down', async () => {
+    ping.mockReturnValue(new Promise(() => undefined));
+
+    const result = service().ready();
+    await jest.advanceTimersByTimeAsync(2_000);
+
+    await expect(result).resolves.toMatchObject({
+      status: 'error',
+      dependencies: { redis: 'error', rabbitmq: 'ok' },
+    });
+  });
+
+  it('closes a RabbitMQ connection that opens after the check timed out', async () => {
+    let open: (connection: unknown) => void = () => undefined;
+    connectMock.mockReturnValue(
+      new Promise((resolve) => (open = resolve)) as never,
+    );
+    const close = jest.fn().mockResolvedValue(undefined);
+
+    const result = service().ready();
+    await jest.advanceTimersByTimeAsync(2_000);
+    await expect(result).resolves.toMatchObject({
+      dependencies: { rabbitmq: 'error' },
+    });
+
+    open({ close });
+    await jest.advanceTimersByTimeAsync(0);
+    expect(close).toHaveBeenCalled();
+  });
+
+  it('checks dependencies in parallel', async () => {
+    ping.mockReturnValue(new Promise(() => undefined));
+    connectMock.mockReturnValue(new Promise(() => undefined) as never);
+
+    const result = service().ready();
+    await jest.advanceTimersByTimeAsync(2_000);
+
+    await expect(result).resolves.toMatchObject({
+      dependencies: { redis: 'error', rabbitmq: 'error' },
+    });
   });
 });
