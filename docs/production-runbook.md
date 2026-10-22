@@ -123,7 +123,7 @@ docker rm -f miya-restore-drill
 
 ### Recovering production
 
-Stop the application services, restore, then start them again so migrations and healthchecks run:
+Stop the application services, restore, then start them again so migrations and healthchecks run, and recreate nginx so it picks up their new addresses:
 
 ```bash
 compose() { docker compose --env-file "$ENV_FILE" -f docker-compose.prod.yml "$@"; }
@@ -133,7 +133,8 @@ RCLONE_CONFIG_B2READ_KEY=<read-key> RESTORE_REMOTE=b2read:<bucket>/postgres \
 CONFIRM_RESTORE=YES ALLOW_DESTRUCTIVE_RESTORE=YES \
 AGE_IDENTITY=/secure/miya-backup-key.txt BACKUP_TIMESTAMP=<timestamp> \
 ENV_FILE=/etc/move-with-miya/env.production ./ops/restore-postgres.sh
-compose up -d user-service backend classes-service registration-service
+compose up -d --wait user-service backend classes-service registration-service
+compose up -d --no-deps --force-recreate nginx
 ```
 
 Files that are not in `BACKUP_DIR` are fetched from `RESTORE_REMOTE`, a remote using the read key (the server's own key can only upload). Checksums are verified before anything is restored. Each dump is restored in a single transaction into a fresh `<database>_restore` database; only after all three succeed are the live databases dropped (`WITH (FORCE)`, closing any remaining connections) and replaced. A failed restore therefore leaves production data as it was (a leftover `*_restore` database is dropped by the next attempt), and tables created by migrations after the backup do not survive a successful one. Remove the read key and the private age key from the server afterwards.

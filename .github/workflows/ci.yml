@@ -203,7 +203,7 @@ jobs:
   ops-scripts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Install age and rclone
@@ -213,5 +213,6 @@ jobs:
           shellcheck -x --severity=warning ops/*.sh ops/tests/*.sh
           ops/tests/shims/docker nginx/test-routing.sh
           ops/observability/test-alertmanager.sh
+          ops/observability/alertmanager-entrypoint.sh
       - name: Test ops scripts
         run: ./ops/tests/run.sh
