@@ -51,9 +51,13 @@ check() {
     failures=$((failures + 1))
   fi
 }
+# Usage: status PATH [CURL_ARGS...]
 status() {
-  https -o /dev/null -w '%{http_code}' "https://$host:$https_port$1"
+  local path=$1
+  shift
+  https -o /dev/null -w '%{http_code}' "$@" "https://$host:$https_port$path"
 }
+uuid=0b9f3c1e-8a52-4d0e-9a6f-2f6c1d7e4b3a
 
 check 'HTTP redirects to HTTPS on the public host' \
   "308 https://$host/classes?x=1" \
@@ -64,15 +68,29 @@ check 'ACME challenges are served over HTTP, not redirected' 'acme-token 200' \
     "http://127.0.0.1:$http_port/.well-known/acme-challenge/token" | tr -d '\n')"
 # Express matches routes case-insensitively, so case variants must be blocked too.
 for path in /metrics /api/metrics /api/metrics/ /api//metrics '/api/%6Detrics' \
-  /api/METRICS /api/Metrics /api/MeTrIcS/ '/api/%4Detrics'; do
+  /api/METRICS /api/Metrics /api/MeTrIcS/ '/api/%4Detrics' \
+  /api/users /api/users/ /api//users /api/users/batch?ids=1 /api/users/me \
+  /api/users/$uuid/role/x; do
   check "$path is blocked" 404 "$(status "$path")"
 done
-for path in /health/live /health/ready /api/classes /api/auth/google /api/users/me /classes; do
+for path in /health/live /health/ready /api/classes /api/auth/google /classes; do
   check "$path is proxied" 502 "$(status "$path")"
 done
+# Browsers may only PATCH a user; reading or deleting one is internal.
+for path in "/api/users/$uuid" "/api/users/$uuid/role" "/api/users/$uuid/ban"; do
+  check "PATCH $path is proxied" 502 "$(status "$path" -X PATCH)"
+  check "GET $path is refused" 403 "$(status "$path")"
+done
+check "DELETE /api/users/$uuid is refused" 403 "$(status "/api/users/$uuid" -X DELETE)"
 check 'HSTS is sent, even on errors' 1 \
   "$(https -D - -o /dev/null "https://$host:$https_port/api/metrics" \
     | grep -ci '^strict-transport-security: max-age=31536000; includeSubDomains')"
+check 'security headers are sent, even on errors' 2 \
+  "$(https -D - -o /dev/null "https://$host:$https_port/api/metrics" \
+    | grep -ci -e '^x-content-type-options: nosniff' -e '^x-frame-options: SAMEORIGIN')"
+check 'the nginx version is not advertised' 0 \
+  "$(curl -s -D - -o /dev/null -H "Host: $host" "http://127.0.0.1:$http_port/" \
+    | grep -ci '^server: nginx/' || true)"
 check 'request bodies are capped at 256k' 413 \
   "$(head -c 300000 /dev/zero | https -o /dev/null -w '%{http_code}' \
     -X POST --data-binary @- "https://$host:$https_port/api/contact")"

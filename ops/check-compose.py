@@ -54,6 +54,12 @@ for name, service in services.items():
         f'{name} restarts unless stopped',
     )
 
+for name, service in services.items():
+    check(
+        ':' in service['image'] and not service['image'].endswith(':latest'),
+        f'{name} pins an image tag',
+    )
+
 for app, job in APPS.items():
     service = services[app]
     check(

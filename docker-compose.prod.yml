@@ -1,3 +1,12 @@
+# One-shot Prisma migration job; each service's job reuses its image.
+x-migrate: &migrate
+  pull_policy: never
+  restart: 'no'
+  command: ['npx', 'prisma', 'migrate', 'deploy']
+  depends_on:
+    postgres:
+      condition: service_healthy
+
 services:
   redis:
     image: redis:7.4.11-alpine
@@ -79,16 +88,11 @@ services:
       retries: 6
 
   user-migrate:
+    <<: *migrate
     image: move-with-miya/user-service:${RELEASE_VERSION:?RELEASE_VERSION is required}
-    pull_policy: never
-    restart: 'no'
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/miya_users
-    command: ['npx', 'prisma', 'migrate', 'deploy']
-    depends_on:
-      postgres:
-        condition: service_healthy
 
   backend:
     image: move-with-miya/backend:${RELEASE_VERSION:?RELEASE_VERSION is required}
@@ -184,16 +188,11 @@ services:
       retries: 6
 
   classes-migrate:
+    <<: *migrate
     image: move-with-miya/classes-service:${RELEASE_VERSION:?RELEASE_VERSION is required}
-    pull_policy: never
-    restart: 'no'
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/miya_classes
-    command: ['npx', 'prisma', 'migrate', 'deploy']
-    depends_on:
-      postgres:
-        condition: service_healthy
 
   registration-service:
     image: move-with-miya/registration-service:${RELEASE_VERSION:?RELEASE_VERSION is required}
@@ -227,16 +226,11 @@ services:
       retries: 6
 
   registration-migrate:
+    <<: *migrate
     image: move-with-miya/registration-service:${RELEASE_VERSION:?RELEASE_VERSION is required}
-    pull_policy: never
-    restart: 'no'
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/miya_registrations
-    command: ['npx', 'prisma', 'migrate', 'deploy']
-    depends_on:
-      postgres:
-        condition: service_healthy
 
   frontend:
     image: move-with-miya/frontend:${RELEASE_VERSION:?RELEASE_VERSION is required}

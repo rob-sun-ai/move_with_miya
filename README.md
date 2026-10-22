@@ -183,6 +183,9 @@ The production stack requires:
 - `GOOGLE_CALLBACK_URL`
 - `PUBLIC_APP_URL`
 - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and `STRIPE_CURRENCY`
+- `RESEND_API_KEY`, `CONTACT_EMAIL_TO`, and `RESEND_FROM_EMAIL`
+- `NEXT_PUBLIC_AUTH_URL` and `NEXT_PUBLIC_TURNSTILE_SITE_KEY` (inlined into the frontend image at build time)
+- `CONTACT_CHALLENGE_SECRET`, `TURNSTILE_SECRET_KEY`, and `TURNSTILE_HOSTNAME`
 - `PUBLIC_HOST`, `TLS_CERT_FILE`, and `TLS_KEY_FILE` (inside `TLS_CERT_DIR`, default `/etc/letsencrypt`)
 - `RELEASE_VERSION` (the image tag, e.g. the git SHA)
 
