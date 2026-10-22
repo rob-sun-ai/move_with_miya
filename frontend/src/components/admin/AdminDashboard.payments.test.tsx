@@ -334,6 +334,70 @@ describe('AdminDashboard payments', () => {
     );
   });
 
+  it('saves other edits before canceling a class from the edit dialog', async () => {
+    const fetchMock = mockApi({
+      '/api/classes': { body: [{ ...yogaClass, status: 'Canceled' }] },
+      '/api/registration': { body: [] },
+      '/api/checkout/payments': { body: [] },
+    });
+    const user = userEvent.setup();
+    renderDashboard({ initialPayments: [payment()] });
+
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    const name = screen.getByRole('textbox', { name: /^Name/ });
+    await user.clear(name);
+    await user.paste('Evening Flow');
+    await user.click(screen.getByRole('combobox', { name: 'Status' }));
+    await user.click(screen.getByRole('option', { name: 'Canceled' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(
+      await screen.findByText('Class canceled and registrations updated.'),
+    ).toBeInTheDocument();
+    expect(confirm).toHaveBeenCalledWith(
+      'Cancel this class and notify all registrants?',
+    );
+    const writes = fetchMock.mock.calls
+      .filter(([, init]) => init?.method && init.method !== 'GET')
+      .map(([input, init]) => [
+        `${init?.method} ${String(input)}`,
+        JSON.parse(String(init?.body)),
+      ]);
+    expect(writes).toEqual([
+      [
+        'PATCH /api/classes/1',
+        expect.objectContaining({ name: 'Evening Flow' }),
+      ],
+      ['POST /api/classes/1/cancel', { reason: 'Canceled by administrator' }],
+    ]);
+    // The cancel endpoint owns the status change.
+    expect(writes[0][1]).not.toHaveProperty('status');
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/registration',
+      expect.anything(),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/checkout/payments',
+      expect.anything(),
+    );
+  });
+
+  it('leaves the edit dialog untouched when the cancellation is not confirmed', async () => {
+    const fetchMock = mockApi({});
+    vi.mocked(confirm).mockReturnValue(false);
+    const user = userEvent.setup();
+    renderDashboard();
+
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    await user.click(screen.getByRole('combobox', { name: 'Status' }));
+    await user.click(screen.getByRole('option', { name: 'Canceled' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
   it('refreshes payments after canceling a registration', async () => {
     const fetchMock = mockApi({
       'POST /api/registration/8/cancel': {

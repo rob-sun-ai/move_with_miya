@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
@@ -32,6 +32,7 @@ import Tab from '@mui/material/Tab';
 import Typography from '@mui/material/Typography';
 import { format } from 'date-fns';
 import { api } from '@/lib/api';
+import { formatCents, formatCost, fullName, locationLabel } from '@/lib/format';
 import type {
   AdminUser,
   ContactSubmission,
@@ -48,6 +49,8 @@ interface AdminDashboardProps {
   initialUsers: AdminUser[];
   initialRegistrations: Registration[];
   initialPayments?: Payment[];
+  /** Sections the server could not load; they are shown empty. */
+  loadErrors?: string[];
 }
 
 type TabValue =
@@ -78,8 +81,7 @@ const emptyClassForm = {
 /** Whole, non-negative numbers only; rejects blank or partial number input. */
 const isWholeNumber = (value: string) => /^\d+$/.test(value.trim());
 
-const formatMoney = (cents: number, currency: string) =>
-  `${(cents / 100).toFixed(2)} ${currency.toUpperCase()}`;
+const CANCEL_CLASS_QUESTION = 'Cancel this class and notify all registrants?';
 
 /** A refund that is already queued is retried as is, not re-requested. */
 const isRefundRetry = (payment: Payment) =>
@@ -100,6 +102,7 @@ export default function AdminDashboard({
   initialUsers,
   initialRegistrations,
   initialPayments = [],
+  loadErrors = [],
 }: AdminDashboardProps) {
   const [tab, setTab] = useState<TabValue>('classes');
   const [classes, setClasses] = useState<YogaClass[]>(initialClasses);
@@ -120,6 +123,9 @@ export default function AdminDashboard({
   const [locationDialog, setLocationDialog] = useState(false);
   const [editingLocation, setEditingLocation] = useState<Location | null>(null);
   const [locationForm, setLocationForm] = useState(emptyLocationForm);
+  const [locationSaveError, setLocationSaveError] = useState<string | null>(
+    null,
+  );
 
   const [selectedClassId, setSelectedClassId] = useState<string>('');
   const [registrationFrom, setRegistrationFrom] = useState('');
@@ -137,6 +143,24 @@ export default function AdminDashboard({
     setNotice(null);
   };
 
+  // Class, location, registration, and ban changes run one at a time so a
+  // double click cannot, for example, create a class twice or toggle a ban
+  // back off (refunds have their own guard below). The ref guards clicks that
+  // land before the disabled state renders.
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const exclusive = async (action: () => Promise<void>) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      await action();
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  };
+
   // Refreshes the payments tab after an action that may have queued refunds.
   // The action itself already succeeded, so a failed refresh is not an error.
   const reloadPayments = async () => {
@@ -152,7 +176,7 @@ export default function AdminDashboard({
     // With no refund requested yet (or one ruled ineligible by the member
     // cancellation policy) issue a full refund; otherwise retry as queued.
     const fullRefund = !isRefundRetry(payment);
-    const amount = formatMoney(
+    const amount = formatCents(
       fullRefund
         ? payment.amountCents
         : (payment.refundAmountCents ?? payment.amountCents),
@@ -226,163 +250,192 @@ export default function AdminDashboard({
     setClassDialog(true);
   };
 
-  const saveClass = async () => {
-    setClassSaveError(null);
-    try {
-      const errors: Record<string, string> = {};
-      if (!classForm.name.trim()) errors.name = 'Name is required.';
-      if (!classForm.locationId) errors.locationId = 'Location is required.';
-      if (!classForm.capacity || Number(classForm.capacity) <= 0) {
-        errors.capacity = 'Capacity must be greater than 0.';
-      }
-      if (classForm.cost === '' || Number.isNaN(Number(classForm.cost))) {
-        errors.cost = 'Cost is required.';
-      }
-      const cutoffValid = isWholeNumber(classForm.cancellationCutoffHours);
-      if (!cutoffValid) {
-        errors.cancellationCutoffHours =
-          'Cancellation cutoff must be a whole number of hours.';
-      }
-      const tierHours = classForm.refundTiers.map((tier) =>
-        Number(tier.hoursBeforeStart),
-      );
-      if (
-        classForm.refundTiers.some(
-          (tier) =>
-            !isWholeNumber(tier.hoursBeforeStart) ||
-            !isWholeNumber(tier.percentage) ||
-            Number(tier.percentage) > 100,
-        )
-      ) {
-        errors.refundPolicy =
-          'Refund tiers must use whole hours and percentages from 0 to 100.';
-      } else if (new Set(tierHours).size !== tierHours.length) {
-        errors.refundPolicy =
-          'Each refund tier needs a different number of hours.';
-      } else if (
-        cutoffValid &&
-        !tierHours.some(
-          (hours) => hours <= Number(classForm.cancellationCutoffHours),
-        )
-      ) {
-        errors.refundPolicy =
-          'Add a refund tier at or below the cancellation cutoff.';
-      }
-      if (!classForm.duration || Number(classForm.duration) <= 0) {
-        errors.duration = 'Duration must be greater than 0.';
-      }
-      if (
-        !classForm.startDate ||
-        Number.isNaN(new Date(classForm.startDate).getTime())
-      ) {
-        errors.startDate = 'Start date is required.';
-      }
-      if (
-        !classForm.endDate ||
-        Number.isNaN(new Date(classForm.endDate).getTime())
-      ) {
-        errors.endDate = 'End date is required.';
-      }
-      if (
-        !errors.startDate &&
-        !errors.endDate &&
-        new Date(classForm.endDate).getTime() <=
-          new Date(classForm.startDate).getTime()
-      ) {
-        errors.endDate = 'End date must be after start date.';
-      }
-      if (Object.keys(errors).length > 0) {
-        setClassErrors(errors);
-        return;
-      }
-      setClassErrors({});
-      const payload = {
-        name: classForm.name,
-        capacity: Number(classForm.capacity),
-        cost: classForm.cost,
-        description: classForm.description,
-        duration: Number(classForm.duration),
-        startDate: new Date(classForm.startDate).toISOString(),
-        endDate: new Date(classForm.endDate).toISOString(),
-        locationId: Number(classForm.locationId),
-        teacherIds: classForm.teacherIds,
-        isPrivate: classForm.isPrivate,
-        status: classForm.status,
-        waitlistEnabled: classForm.waitlistEnabled,
-        cancellationCutoffHours: Number(classForm.cancellationCutoffHours),
-        refundPolicy: classForm.refundTiers.map((tier) => ({
-          hoursBeforeStart: Number(tier.hoursBeforeStart),
-          percentage: Number(tier.percentage),
-        })),
-      };
-      if (editingClass) {
-        const canceling =
-          classForm.status === 'Canceled' && editingClass.status !== 'Canceled';
-        await api(
-          `/api/classes/${editingClass.id}${canceling ? '/cancel' : ''}`,
-          {
-            method: canceling ? 'POST' : 'PATCH',
-            body: JSON.stringify(payload),
-          },
+  const saveClass = () =>
+    exclusive(async () => {
+      setClassSaveError(null);
+      try {
+        const errors: Record<string, string> = {};
+        if (!classForm.name.trim()) errors.name = 'Name is required.';
+        if (!classForm.locationId) errors.locationId = 'Location is required.';
+        if (!classForm.capacity || Number(classForm.capacity) <= 0) {
+          errors.capacity = 'Capacity must be greater than 0.';
+        }
+        if (classForm.cost === '' || Number.isNaN(Number(classForm.cost))) {
+          errors.cost = 'Cost is required.';
+        }
+        const cutoffValid = isWholeNumber(classForm.cancellationCutoffHours);
+        if (!cutoffValid) {
+          errors.cancellationCutoffHours =
+            'Cancellation cutoff must be a whole number of hours.';
+        }
+        const tierHours = classForm.refundTiers.map((tier) =>
+          Number(tier.hoursBeforeStart),
         );
-      } else {
-        await api('/api/classes', {
-          method: 'POST',
-          body: JSON.stringify(payload),
-        });
+        if (
+          classForm.refundTiers.some(
+            (tier) =>
+              !isWholeNumber(tier.hoursBeforeStart) ||
+              !isWholeNumber(tier.percentage) ||
+              Number(tier.percentage) > 100,
+          )
+        ) {
+          errors.refundPolicy =
+            'Refund tiers must use whole hours and percentages from 0 to 100.';
+        } else if (new Set(tierHours).size !== tierHours.length) {
+          errors.refundPolicy =
+            'Each refund tier needs a different number of hours.';
+        } else if (
+          cutoffValid &&
+          !tierHours.some(
+            (hours) => hours <= Number(classForm.cancellationCutoffHours),
+          )
+        ) {
+          errors.refundPolicy =
+            'Add a refund tier at or below the cancellation cutoff.';
+        }
+        if (!classForm.duration || Number(classForm.duration) <= 0) {
+          errors.duration = 'Duration must be greater than 0.';
+        }
+        if (
+          !classForm.startDate ||
+          Number.isNaN(new Date(classForm.startDate).getTime())
+        ) {
+          errors.startDate = 'Start date is required.';
+        }
+        if (
+          !classForm.endDate ||
+          Number.isNaN(new Date(classForm.endDate).getTime())
+        ) {
+          errors.endDate = 'End date is required.';
+        }
+        if (
+          !errors.startDate &&
+          !errors.endDate &&
+          new Date(classForm.endDate).getTime() <=
+            new Date(classForm.startDate).getTime()
+        ) {
+          errors.endDate = 'End date must be after start date.';
+        }
+        if (Object.keys(errors).length > 0) {
+          setClassErrors(errors);
+          return;
+        }
+        setClassErrors({});
+        const canceling =
+          editingClass !== null &&
+          classForm.status === 'Canceled' &&
+          editingClass.status !== 'Canceled';
+        if (canceling && !confirm(CANCEL_CLASS_QUESTION)) return;
+        const payload = {
+          name: classForm.name,
+          capacity: Number(classForm.capacity),
+          cost: classForm.cost,
+          description: classForm.description,
+          duration: Number(classForm.duration),
+          startDate: new Date(classForm.startDate).toISOString(),
+          endDate: new Date(classForm.endDate).toISOString(),
+          locationId: Number(classForm.locationId),
+          teacherIds: classForm.teacherIds,
+          isPrivate: classForm.isPrivate,
+          // The cancel endpoint sets the status. Leaving it out of the edit
+          // also keeps a retry after a failed refresh from reopening the class.
+          status: canceling ? undefined : classForm.status,
+          waitlistEnabled: classForm.waitlistEnabled,
+          cancellationCutoffHours: Number(classForm.cancellationCutoffHours),
+          refundPolicy: classForm.refundTiers.map((tier) => ({
+            hoursBeforeStart: Number(tier.hoursBeforeStart),
+            percentage: Number(tier.percentage),
+          })),
+        };
+        if (editingClass) {
+          // The cancel endpoint only changes the status, so save the other
+          // edits first, then cancel through the same flow as the Cancel button.
+          await api(`/api/classes/${editingClass.id}`, {
+            method: 'PATCH',
+            body: JSON.stringify(payload),
+          });
+          if (canceling) await requestClassCancellation(editingClass.id);
+        } else {
+          await api('/api/classes', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          });
+        }
+        if (canceling) {
+          await reloadAfterCancellation();
+        } else {
+          setClasses(await api<YogaClass[]>('/api/classes'));
+        }
+        setClassDialog(false);
+        showNotice(
+          canceling
+            ? 'Class canceled and registrations updated.'
+            : editingClass
+              ? 'Class updated.'
+              : 'Class created.',
+        );
+      } catch (err) {
+        // The dialog stays open, so show the error where the admin is looking.
+        setClassSaveError(err instanceof Error ? err.message : 'Save failed.');
       }
-      const updated = await api<YogaClass[]>('/api/classes');
-      setClasses(updated);
-      setClassDialog(false);
-      showNotice(editingClass ? 'Class updated.' : 'Class created.');
-    } catch (err) {
-      // The dialog stays open, so show the error where the admin is looking.
-      setClassSaveError(err instanceof Error ? err.message : 'Save failed.');
-    }
-  };
+    });
 
   const deleteClass = async (id: number) => {
     if (!confirm('Delete this class?')) return;
-    try {
-      await api(`/api/classes/${id}`, { method: 'DELETE' });
-      const updated = await api<YogaClass[]>('/api/classes');
-      setClasses(updated);
-      showNotice('Class deleted.');
-    } catch (err) {
-      showError(err instanceof Error ? err.message : 'Delete failed.');
-    }
+    await exclusive(async () => {
+      try {
+        await api(`/api/classes/${id}`, { method: 'DELETE' });
+        const updated = await api<YogaClass[]>('/api/classes');
+        setClasses(updated);
+        showNotice('Class deleted.');
+      } catch (err) {
+        showError(err instanceof Error ? err.message : 'Delete failed.');
+      }
+    });
+  };
+
+  const requestClassCancellation = (id: number) =>
+    api(`/api/classes/${id}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ reason: 'Canceled by administrator' }),
+    });
+
+  // Canceling a class cancels its registrations and may queue refunds.
+  const reloadAfterCancellation = async () => {
+    const [updatedClasses, updatedRegistrations] = await Promise.all([
+      api<YogaClass[]>('/api/classes'),
+      api<Registration[]>('/api/registration'),
+    ]);
+    setClasses(updatedClasses);
+    setRegistrations(updatedRegistrations);
+    await reloadPayments();
   };
 
   const cancelClass = async (id: number) => {
-    if (!confirm('Cancel this class and notify all registrants?')) return;
-    try {
-      await api(`/api/classes/${id}/cancel`, {
-        method: 'POST',
-        body: JSON.stringify({ reason: 'Canceled by administrator' }),
-      });
-      const [updatedClasses, updatedRegistrations] = await Promise.all([
-        api<YogaClass[]>('/api/classes'),
-        api<Registration[]>('/api/registration'),
-      ]);
-      setClasses(updatedClasses);
-      setRegistrations(updatedRegistrations);
-      await reloadPayments();
-      showNotice('Class canceled and registrations updated.');
-    } catch (err) {
-      showError(
-        err instanceof Error ? err.message : 'Class cancellation failed.',
-      );
-    }
+    if (!confirm(CANCEL_CLASS_QUESTION)) return;
+    await exclusive(async () => {
+      try {
+        await requestClassCancellation(id);
+        await reloadAfterCancellation();
+        showNotice('Class canceled and registrations updated.');
+      } catch (err) {
+        showError(
+          err instanceof Error ? err.message : 'Class cancellation failed.',
+        );
+      }
+    });
   };
 
   const openNewLocation = () => {
     setEditingLocation(null);
+    setLocationSaveError(null);
     setLocationForm(emptyLocationForm);
     setLocationDialog(true);
   };
 
   const openEditLocation = (loc: Location) => {
     setEditingLocation(loc);
+    setLocationSaveError(null);
     setLocationForm({
       name: loc.name ?? '',
       address: loc.address,
@@ -393,63 +446,72 @@ export default function AdminDashboard({
     setLocationDialog(true);
   };
 
-  const saveLocation = async () => {
-    try {
-      const payload = { ...locationForm, name: locationForm.name || null };
-      if (editingLocation) {
-        await api(`/api/locations/${editingLocation.id}`, {
-          method: 'PATCH',
-          body: JSON.stringify(payload),
-        });
-      } else {
-        await api('/api/locations', {
-          method: 'POST',
-          body: JSON.stringify(payload),
-        });
+  const saveLocation = () =>
+    exclusive(async () => {
+      setLocationSaveError(null);
+      try {
+        const payload = { ...locationForm, name: locationForm.name || null };
+        if (editingLocation) {
+          await api(`/api/locations/${editingLocation.id}`, {
+            method: 'PATCH',
+            body: JSON.stringify(payload),
+          });
+        } else {
+          await api('/api/locations', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          });
+        }
+        const updated = await api<Location[]>('/api/locations');
+        setLocations(updated);
+        setLocationDialog(false);
+        showNotice(editingLocation ? 'Location updated.' : 'Location created.');
+      } catch (err) {
+        // The dialog stays open, so show the error where the admin is looking.
+        setLocationSaveError(
+          err instanceof Error ? err.message : 'Save failed.',
+        );
       }
-      const updated = await api<Location[]>('/api/locations');
-      setLocations(updated);
-      setLocationDialog(false);
-      showNotice(editingLocation ? 'Location updated.' : 'Location created.');
-    } catch (err) {
-      showError(err instanceof Error ? err.message : 'Save failed.');
-    }
-  };
+    });
 
   const deleteLocation = async (id: number) => {
     if (!confirm('Delete this location?')) return;
-    try {
-      await api(`/api/locations/${id}`, { method: 'DELETE' });
-      const updated = await api<Location[]>('/api/locations');
-      setLocations(updated);
-      showNotice('Location deleted.');
-    } catch (err) {
-      showError(err instanceof Error ? err.message : 'Delete failed.');
-    }
+    await exclusive(async () => {
+      try {
+        await api(`/api/locations/${id}`, { method: 'DELETE' });
+        const updated = await api<Location[]>('/api/locations');
+        setLocations(updated);
+        showNotice('Location deleted.');
+      } catch (err) {
+        showError(err instanceof Error ? err.message : 'Delete failed.');
+      }
+    });
   };
 
   const cancelRegistration = async (id: number) => {
     if (!confirm('Cancel this registration?')) return;
-    try {
-      const updated = await api<Registration>(
-        `/api/registration/${id}/cancel`,
-        {
-          method: 'POST',
-          body: JSON.stringify({ reason: 'Canceled by administrator' }),
-        },
-      );
-      setRegistrations((previous) =>
-        previous.map((reg) =>
-          reg.id === id
-            ? { ...reg, ...updated, status: updated.status ?? 'Canceled' }
-            : reg,
-        ),
-      );
-      await reloadPayments();
-      showNotice('Registration cancelled.');
-    } catch (err) {
-      showError(err instanceof Error ? err.message : 'Cancel failed.');
-    }
+    await exclusive(async () => {
+      try {
+        const updated = await api<Registration>(
+          `/api/registration/${id}/cancel`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ reason: 'Canceled by administrator' }),
+          },
+        );
+        setRegistrations((previous) =>
+          previous.map((reg) =>
+            reg.id === id
+              ? { ...reg, ...updated, status: updated.status ?? 'Canceled' }
+              : reg,
+          ),
+        );
+        await reloadPayments();
+        showNotice('Registration cancelled.');
+      } catch (err) {
+        showError(err instanceof Error ? err.message : 'Cancel failed.');
+      }
+    });
   };
 
   const markContactRead = async (item: ContactSubmission) => {
@@ -510,17 +572,18 @@ export default function AdminDashboard({
     }
   };
 
-  const toggleUserBan = async (id: string) => {
-    try {
-      await api(`/api/users/${id}/ban`, { method: 'PATCH' });
-      setUsers((prev) =>
-        prev.map((u) => (u.id === id ? { ...u, banned: !u.banned } : u)),
-      );
-      showNotice('User ban status updated.');
-    } catch (err) {
-      showError(err instanceof Error ? err.message : 'Ban update failed.');
-    }
-  };
+  const toggleUserBan = (id: string) =>
+    exclusive(async () => {
+      try {
+        await api(`/api/users/${id}/ban`, { method: 'PATCH' });
+        setUsers((prev) =>
+          prev.map((u) => (u.id === id ? { ...u, banned: !u.banned } : u)),
+        );
+        showNotice('User ban status updated.');
+      } catch (err) {
+        showError(err instanceof Error ? err.message : 'Ban update failed.');
+      }
+    });
 
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>
@@ -528,6 +591,12 @@ export default function AdminDashboard({
         Admin
       </Typography>
 
+      {loadErrors.length > 0 && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          Could not load {loadErrors.join(', ')}. Those sections may be
+          incomplete; reload the page to try again.
+        </Alert>
+      )}
       {notice && (
         <Alert
           severity="success"
@@ -581,11 +650,8 @@ export default function AdminDashboard({
                       {format(new Date(cls.startDate), 'MMM d, h:mm a')}
                     </TableCell>
                     <TableCell>{cls.capacity}</TableCell>
-                    <TableCell>${cls.cost}</TableCell>
-                    <TableCell>
-                      {cls.location.name ??
-                        `${cls.location.city}, ${cls.location.state}`}
-                    </TableCell>
+                    <TableCell>{formatCost(cls.cost)}</TableCell>
+                    <TableCell>{locationLabel(cls.location)}</TableCell>
                     <TableCell>{cls.status}</TableCell>
                     <TableCell>{cls.isPrivate ? 'Yes' : 'No'}</TableCell>
                     <TableCell>
@@ -596,7 +662,7 @@ export default function AdminDashboard({
                         <Button
                           size="small"
                           color="error"
-                          disabled={cls.status === 'Canceled'}
+                          disabled={busy || cls.status === 'Canceled'}
                           onClick={() => cancelClass(cls.id)}
                         >
                           Cancel
@@ -604,6 +670,7 @@ export default function AdminDashboard({
                         <Button
                           size="small"
                           color="error"
+                          disabled={busy}
                           onClick={() => deleteClass(cls.id)}
                         >
                           Delete
@@ -663,6 +730,7 @@ export default function AdminDashboard({
                         <Button
                           size="small"
                           color="error"
+                          disabled={busy}
                           onClick={() => deleteLocation(loc.id)}
                         >
                           Delete
@@ -742,9 +810,7 @@ export default function AdminDashboard({
                     <TableRow key={reg.id}>
                       <TableCell>{reg.id}</TableCell>
                       <TableCell>
-                        {reg.user
-                          ? `${reg.user.firstName} ${reg.user.lastName}`.trim()
-                          : reg.userId}
+                        {reg.user ? fullName(reg.user) : reg.userId}
                         <Typography
                           variant="caption"
                           color="text.secondary"
@@ -776,6 +842,7 @@ export default function AdminDashboard({
                         <Button
                           size="small"
                           color="error"
+                          disabled={busy || reg.status === 'Canceled'}
                           onClick={() => cancelRegistration(reg.id)}
                         >
                           Cancel
@@ -826,7 +893,7 @@ export default function AdminDashboard({
                       payment.classId}
                   </TableCell>
                   <TableCell>
-                    {formatMoney(payment.amountCents, payment.currency)}
+                    {formatCents(payment.amountCents, payment.currency)}
                   </TableCell>
                   <TableCell>
                     <Chip label={payment.status} size="small" />
@@ -834,7 +901,7 @@ export default function AdminDashboard({
                   <TableCell>
                     {payment.refundStatus}
                     {payment.refundAmountCents != null &&
-                      ` (${formatMoney(payment.refundAmountCents, payment.currency)})`}
+                      ` (${formatCents(payment.refundAmountCents, payment.currency)})`}
                     {payment.refundNeedsAttention && (
                       <Chip
                         label={`Needs attention (${payment.refundAttempts ?? 0} attempts)`}
@@ -954,6 +1021,7 @@ export default function AdminDashboard({
                     <FormControl size="small">
                       <Select
                         value={user.role}
+                        inputProps={{ 'aria-label': `Role for ${user.email}` }}
                         onChange={(e) =>
                           updateUserRole(user.id, e.target.value as string)
                         }
@@ -977,6 +1045,7 @@ export default function AdminDashboard({
                     <Button
                       size="small"
                       color={user.banned ? 'success' : 'warning'}
+                      disabled={busy}
                       onClick={() => toggleUserBan(user.id)}
                     >
                       {user.banned ? 'Unban' : 'Ban'}
@@ -1221,7 +1290,7 @@ export default function AdminDashboard({
                 >
                   {locations.map((loc) => (
                     <MenuItem key={loc.id} value={String(loc.id)}>
-                      {loc.name ?? `${loc.city}, ${loc.state}`}
+                      {locationLabel(loc)}
                     </MenuItem>
                   ))}
                 </Select>
@@ -1250,14 +1319,14 @@ export default function AdminDashboard({
                     return sel
                       .map((id) => {
                         const u = users.find((u) => u.id === id);
-                        return u ? `${u.firstName} ${u.lastName}`.trim() : id;
+                        return u ? fullName(u) : id;
                       })
                       .join(', ');
                   }}
                 >
                   {users.map((u) => (
                     <MenuItem key={u.id} value={u.id}>
-                      {`${u.firstName} ${u.lastName}`.trim()} ({u.role})
+                      {fullName(u)} ({u.role})
                     </MenuItem>
                   ))}
                 </Select>
@@ -1313,7 +1382,7 @@ export default function AdminDashboard({
           <Button onClick={() => setClassDialog(false)} color="inherit">
             Cancel
           </Button>
-          <Button variant="contained" onClick={saveClass}>
+          <Button variant="contained" disabled={busy} onClick={saveClass}>
             Save
           </Button>
         </DialogActions>
@@ -1329,6 +1398,11 @@ export default function AdminDashboard({
           {editingLocation ? 'Edit Location' : 'New Location'}
         </DialogTitle>
         <DialogContent>
+          {locationSaveError && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {locationSaveError}
+            </Alert>
+          )}
           <Grid container spacing={2} sx={{ mt: 0 }}>
             <Grid size={12}>
               <TextField
@@ -1386,7 +1460,7 @@ export default function AdminDashboard({
           <Button onClick={() => setLocationDialog(false)} color="inherit">
             Cancel
           </Button>
-          <Button variant="contained" onClick={saveLocation}>
+          <Button variant="contained" disabled={busy} onClick={saveLocation}>
             Save
           </Button>
         </DialogActions>

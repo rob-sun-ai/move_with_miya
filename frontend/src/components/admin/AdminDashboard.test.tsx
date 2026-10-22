@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ComponentProps } from 'react';
@@ -97,6 +97,40 @@ describe('AdminDashboard', () => {
     expect(screen.getByText('person@example.com')).toBeInTheDocument();
     await user.click(screen.getByRole('tab', { name: 'Users' }));
     expect(screen.getByText('admin@example.com')).toBeInTheDocument();
+    expect(
+      screen.getByRole('combobox', { name: 'Role for admin@example.com' }),
+    ).toHaveTextContent('Admin');
+  });
+
+  it('says which sections the server could not load', () => {
+    renderDashboard({ loadErrors: ['payments', 'users'] });
+
+    expect(
+      screen.getByText(/Could not load payments, users\./),
+    ).toBeInTheDocument();
+  });
+
+  it('shows a rejected location save inside the dialog', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({ message: 'zipCode must be a non-empty string' }),
+        {
+          status: 400,
+        },
+      ),
+    );
+    renderDashboard();
+
+    await user.click(screen.getByRole('tab', { name: 'Locations' }));
+    await user.click(screen.getByRole('button', { name: 'New Location' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(
+      await within(screen.getByRole('dialog')).findByText(
+        'zipCode must be a non-empty string',
+      ),
+    ).toBeInTheDocument();
   });
 
   it('validates a new class before sending it', async () => {

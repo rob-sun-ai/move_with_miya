@@ -11,7 +11,7 @@ import Typography from '@mui/material/Typography';
 import { api } from '@/lib/api';
 
 // Polls back off so a slow webhook stays within the status endpoint's
-// per-member rate limit: 8 checks over about two minutes.
+// rate limit: 8 checks over about two minutes.
 const MAX_POLLS = 8;
 const FIRST_POLL_DELAY_MS = 2000;
 const MAX_POLL_DELAY_MS = 30_000;
