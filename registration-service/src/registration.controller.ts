@@ -75,22 +75,8 @@ export class RegistrationController {
   }
 
   @MessagePattern({ cmd: 'delete_registration_by_class_and_user' })
-  deleteRegistrationByClassAndUser(data: {
-    classId: number;
-    userId: string;
-    capacity?: number;
-    classStartAt?: string;
-    cancellationCutoffHours?: number;
-  }) {
-    return this.registrationService.cancelRegistrationByClassAndUser(
-      data.classId,
-      data.userId,
-      {
-        capacity: data.capacity ?? 1,
-        classStartAt: data.classStartAt,
-        cancellationCutoffHours: data.cancellationCutoffHours,
-      },
-    );
+  deleteRegistrationByClassAndUser() {
+    return this.registrationService.deleteRegistrationByClassAndUser();
   }
 
   @MessagePattern({ cmd: 'cancel_registration' })
