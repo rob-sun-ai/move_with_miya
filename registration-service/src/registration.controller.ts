@@ -49,14 +49,6 @@ export class RegistrationController {
     return this.registrationService.getRegistrationCounts(data.classIds);
   }
 
-  @MessagePattern({ cmd: 'get_class_payment_availability' })
-  getClassPaymentAvailability(data: { classId: number; capacity: number }) {
-    return this.registrationService.getClassPaymentAvailability(
-      data.classId,
-      data.capacity,
-    );
-  }
-
   @MessagePattern({ cmd: 'create_or_get_pending_payment' })
   createOrGetPendingPayment(data: {
     userId: string;
@@ -80,13 +72,6 @@ export class RegistrationController {
   @MessagePattern({ cmd: 'get_payment_by_id' })
   getPaymentById(data: { id: string }) {
     return this.registrationService.getPaymentById(data.id);
-  }
-
-  @MessagePattern({ cmd: 'get_payment_by_checkout_session' })
-  getPaymentByCheckoutSession(data: { stripeCheckoutSessionId: string }) {
-    return this.registrationService.getPaymentByCheckoutSession(
-      data.stripeCheckoutSessionId,
-    );
   }
 
   @MessagePattern({ cmd: 'get_payment_by_payment_intent' })

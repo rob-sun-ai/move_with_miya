@@ -446,7 +446,7 @@ describe('RegistrationService', () => {
         classStatus: 'Canceled',
         classEndAt: '2099-01-01T11:00:00.000Z',
       }),
-    ).resolves.toEqual({ payment, registration: null, needsRefund: true });
+    ).resolves.toEqual({ payment, registration: null, needsRefund: false });
     expect(prisma.payment.update).not.toHaveBeenCalled();
   });
 

@@ -8,6 +8,17 @@ class RpcError extends RpcException {
   }
 }
 
+/**
+ * Payments that hold a member's slot for a class: a checkout in flight or a
+ * paid seat with no refund requested. Matches `Payment_active_user_class_key`.
+ */
+const ACTIVE_PAYMENT_WHERE = {
+  OR: [
+    { status: 'Pending' as const },
+    { status: 'Paid' as const, refundStatus: 'None' as const },
+  ],
+};
+
 /** Largest value a Postgres INTEGER column holds. */
 const PG_INT_MAX = 2_147_483_647;
 
@@ -49,6 +60,46 @@ function errorMessage(error: unknown) {
   return typeof error === 'string' ? error.slice(0, 500) : undefined;
 }
 
+function assertPaymentInput(amountCents: number, currency: string) {
+  if (
+    !Number.isSafeInteger(amountCents) ||
+    amountCents <= 0 ||
+    amountCents > PG_INT_MAX
+  ) {
+    throw new RpcError(400, 'Payment amount is invalid');
+  }
+  if (!/^[a-z]{3}$/.test(currency)) {
+    throw new RpcError(400, 'Payment currency is invalid');
+  }
+}
+
+function assertRefundPercentage(percentage: number) {
+  if (!Number.isInteger(percentage) || percentage < 0 || percentage > 100) {
+    throw new RpcError(
+      400,
+      'Refund percentage must be an integer from 0 to 100',
+    );
+  }
+}
+
+/** A refund that was requested and has not succeeded yet. */
+function isRefundInFlight(refundStatus: string) {
+  return refundStatus === 'Pending' || refundStatus === 'Failed';
+}
+
+/** Payment fields that request a refund of `percentage` of the amount paid. */
+function refundRequest(amountCents: number, percentage: number) {
+  const refundAmountCents = Math.floor((amountCents * percentage) / 100);
+  return {
+    refundPercentage: percentage,
+    refundAmountCents,
+    refundRequestedAt: new Date(),
+    refundStatus:
+      refundAmountCents > 0 ? ('Pending' as const) : ('NotEligible' as const),
+    refundError: null,
+  };
+}
+
 const SERIALIZABLE_MAX_ATTEMPTS = 5;
 
 /**
@@ -81,48 +132,6 @@ const EDITABLE_REGISTRATION_FIELDS = new Set(['cancellationReason']);
 const NOTIFICATION_LEASE_MS = 5 * 60 * 1_000;
 
 const MAX_CONTACT_PAGE_SIZE = 100;
-
-/**
- * Payments that hold a member's slot for a class: a checkout in flight or a
- * paid seat with no refund requested. Matches `Payment_active_user_class_key`.
- */
-const ACTIVE_PAYMENT_WHERE = {
-  OR: [
-    { status: 'Pending' as const },
-    { status: 'Paid' as const, refundStatus: 'None' as const },
-  ],
-};
-
-function assertPaymentInput(amountCents: number, currency: string) {
-  if (!Number.isSafeInteger(amountCents) || amountCents <= 0) {
-    throw new RpcError(400, 'Payment amount is invalid');
-  }
-  if (!/^[a-z]{3}$/.test(currency)) {
-    throw new RpcError(400, 'Payment currency is invalid');
-  }
-}
-
-function assertRefundPercentage(percentage: number) {
-  if (!Number.isInteger(percentage) || percentage < 0 || percentage > 100) {
-    throw new RpcError(
-      400,
-      'Refund percentage must be an integer from 0 to 100',
-    );
-  }
-}
-
-/** Payment fields that request a refund of `percentage` of the amount paid. */
-function refundRequest(amountCents: number, percentage: number) {
-  const refundAmountCents = Math.floor((amountCents * percentage) / 100);
-  return {
-    refundPercentage: percentage,
-    refundAmountCents,
-    refundRequestedAt: new Date(),
-    refundStatus:
-      refundAmountCents > 0 ? ('Pending' as const) : ('NotEligible' as const),
-    refundError: null,
-  };
-}
 
 @Injectable()
 export class RegistrationService {
@@ -200,28 +209,6 @@ export class RegistrationService {
     return reg;
   }
 
-  async getClassPaymentAvailability(classId: number, capacity: number) {
-    if (!Number.isInteger(capacity) || capacity <= 0) {
-      throw new RpcError(400, 'Class capacity is invalid');
-    }
-    const now = new Date();
-    const [registered, pending] = await Promise.all([
-      this.prisma.client.registration.count({
-        where: { classId, status: 'Registered' },
-      }),
-      this.prisma.client.payment.count({
-        where: { classId, status: 'Pending', expiresAt: { gt: now } },
-      }),
-    ]);
-    return {
-      classId,
-      capacity,
-      registered,
-      pending,
-      available: Math.max(0, capacity - registered - pending),
-    };
-  }
-
   async createOrGetPendingPayment(data: {
     userId: string;
     classId: number;
@@ -231,9 +218,15 @@ export class RegistrationService {
     expiresAt: string | Date;
   }) {
     assertPaymentInput(data.amountCents, data.currency);
-    if (!data.userId || !Number.isInteger(data.classId) || data.classId <= 0) {
+    if (
+      typeof data.userId !== 'string' ||
+      !data.userId ||
+      !Number.isInteger(data.classId) ||
+      data.classId <= 0
+    ) {
       throw new RpcError(400, 'Payment owner or class is invalid');
     }
+    assertCapacity(data.capacity);
     const expiresAt = new Date(data.expiresAt);
     if (Number.isNaN(expiresAt.getTime()) || expiresAt <= new Date()) {
       throw new RpcError(400, 'Payment expiration is invalid');
@@ -301,36 +294,50 @@ export class RegistrationService {
     paymentId: string;
     stripeCheckoutSessionId: string;
   }) {
-    if (!data.paymentId || !data.stripeCheckoutSessionId) {
+    if (
+      typeof data.paymentId !== 'string' ||
+      typeof data.stripeCheckoutSessionId !== 'string' ||
+      !data.paymentId ||
+      !data.stripeCheckoutSessionId
+    ) {
       throw new RpcError(400, 'Payment and Checkout session are required');
     }
+    // Compare-and-set, so two concurrent checkouts for one payment cannot
+    // both attach a session: the loser's session could be paid but never
+    // matched to the payment.
+    const { count } = await this.prisma.client.payment.updateMany({
+      where: {
+        id: data.paymentId,
+        status: 'Pending',
+        OR: [
+          { stripeCheckoutSessionId: null },
+          { stripeCheckoutSessionId: data.stripeCheckoutSessionId },
+        ],
+      },
+      data: { stripeCheckoutSessionId: data.stripeCheckoutSessionId },
+    });
     const payment = await this.prisma.client.payment.findUnique({
       where: { id: data.paymentId },
     });
     if (!payment) throw new RpcError(404, 'Payment not found');
-    if (
-      payment.stripeCheckoutSessionId &&
-      payment.stripeCheckoutSessionId !== data.stripeCheckoutSessionId
-    ) {
-      throw new RpcError(409, 'Payment already has a Checkout session');
+    if (count === 0) {
+      throw new RpcError(
+        409,
+        payment.status === 'Pending'
+          ? 'Payment already has a Checkout session'
+          : 'Payment is no longer pending',
+      );
     }
-    return this.prisma.client.payment.update({
-      where: { id: data.paymentId },
-      data: { stripeCheckoutSessionId: data.stripeCheckoutSessionId },
-    });
+    return payment;
   }
 
-  getPaymentById(id: string) {
+  async getPaymentById(id: string) {
+    assertKey(id, 'Payment');
     return this.prisma.client.payment.findUnique({ where: { id } });
   }
 
-  getPaymentByCheckoutSession(stripeCheckoutSessionId: string) {
-    return this.prisma.client.payment.findUnique({
-      where: { stripeCheckoutSessionId },
-    });
-  }
-
-  getPaymentByPaymentIntent(paymentIntentId: string) {
+  async getPaymentByPaymentIntent(paymentIntentId: string) {
+    assertKey(paymentIntentId, 'PaymentIntent');
     return this.prisma.client.payment.findUnique({
       where: { stripePaymentIntentId: paymentIntentId },
     });
@@ -340,6 +347,8 @@ export class RegistrationService {
     stripeCheckoutSessionId: string,
     userId: string,
   ) {
+    assertKey(stripeCheckoutSessionId, 'Checkout session');
+    assertKey(userId, 'User');
     const payment = await this.prisma.client.payment.findUnique({
       where: { stripeCheckoutSessionId },
     });
@@ -378,10 +387,9 @@ export class RegistrationService {
     classStatus: string;
     classEndAt: string;
   }) {
+    assertKey(data.paymentId, 'Payment');
     assertPaymentInput(data.amountCents, data.currency);
-    if (!Number.isInteger(data.capacity) || data.capacity <= 0) {
-      throw new RpcError(400, 'Class capacity is invalid');
-    }
+    assertCapacity(data.capacity);
     if (
       !data.classStatus ||
       Number.isNaN(new Date(data.classEndAt).getTime())
@@ -422,64 +430,50 @@ export class RegistrationService {
       // A replayed webhook for a fulfilled payment changes nothing, even once
       // the class is over: the member had the seat. Refunds for a canceled
       // class are queued by beginClassRefunds.
-      const fulfilledRegistrationId =
-        payment.status === 'Paid' ? payment.registrationId : null;
-      if (fulfilledRegistrationId && payment.refundStatus === 'None') {
+      if (
+        payment.status === 'Paid' &&
+        payment.registrationId &&
+        payment.refundStatus === 'None'
+      ) {
         const registration = await tx.registration.findUnique({
-          where: { id: fulfilledRegistrationId },
+          where: { id: payment.registrationId },
         });
         return { payment, registration, needsRefund: false };
       }
 
-      const classUnavailable =
-        data.classStatus === 'Canceled' ||
-        data.classStatus === 'Completed' ||
-        new Date(data.classEndAt).getTime() <= Date.now();
-      if (classUnavailable) {
-        if (
-          payment.status === 'Refunded' ||
-          payment.refundStatus === 'Succeeded'
-        ) {
-          return { payment, registration: null, needsRefund: false };
-        }
-        // A replayed webhook must not overwrite a refund that was already
-        // requested (possibly for a partial amount).
-        if (payment.status === 'Paid' && payment.refundStatus !== 'None') {
-          return {
-            payment,
-            registration: null,
-            needsRefund:
-              payment.refundStatus === 'Pending' ||
-              payment.refundStatus === 'Failed',
-          };
-        }
+      // A replayed webhook must not touch a refund that was already
+      // requested, possibly for a partial amount. The refund sweep retries
+      // it with backoff; asking for it again here would reset its attempt
+      // budget or replace the amount with the caller's full refund.
+      if (payment.status === 'Refunded' || payment.refundStatus !== 'None') {
         return {
-          payment: await markPaidForFullRefund(),
-          registration: null,
-          needsRefund: true,
-        };
-      }
-
-      if (fulfilledRegistrationId) {
-        const registration = await tx.registration.findUnique({
-          where: { id: fulfilledRegistrationId },
-        });
-        return { payment, registration, needsRefund: false };
-      }
-      if (payment.status !== 'Pending') {
-        const updatedPayment =
-          payment.status === 'Expired' || payment.status === 'Failed'
-            ? await markPaidForFullRefund()
-            : data.paymentIntentId && !payment.stripePaymentIntentId
+          // The sweep needs the PaymentIntent to issue the refund.
+          payment:
+            isRefundInFlight(payment.refundStatus) &&
+            data.paymentIntentId &&
+            !payment.stripePaymentIntentId
               ? await tx.payment.update({
                   where: { id: payment.id },
                   data: { stripePaymentIntentId: data.paymentIntentId },
                 })
-              : payment;
-        return {
-          payment: updatedPayment,
+              : payment,
           registration: null,
-          needsRefund: updatedPayment.status !== 'Refunded',
+          needsRefund: false,
+        };
+      }
+
+      // No seat was granted for this payment: the class can no longer be
+      // attended, or the checkout had already expired or failed.
+      if (
+        data.classStatus === 'Canceled' ||
+        data.classStatus === 'Completed' ||
+        new Date(data.classEndAt).getTime() <= Date.now() ||
+        payment.status !== 'Pending'
+      ) {
+        return {
+          payment: await markPaidForFullRefund(),
+          registration: null,
+          needsRefund: true,
         };
       }
 
@@ -548,14 +542,17 @@ export class RegistrationService {
 
   // A checkout failure is not a refund error, so it is not stored in
   // refundError where admin views would report it as one.
-  markPaymentFailed(id: string) {
+  async markPaymentFailed(id: string) {
+    // Without this check an undefined id would fail every pending payment.
+    assertKey(id, 'Payment');
     return this.prisma.client.payment.updateMany({
       where: { id, status: 'Pending' },
       data: { status: 'Failed' },
     });
   }
 
-  markPaymentExpired(id: string) {
+  async markPaymentExpired(id: string) {
+    assertKey(id, 'Payment');
     return this.prisma.client.payment.updateMany({
       where: { id, status: 'Pending' },
       data: { status: 'Expired' },
@@ -563,6 +560,7 @@ export class RegistrationService {
   }
 
   async beginPaymentRefund(data: { paymentId: string; percentage: number }) {
+    assertKey(data.paymentId, 'Payment');
     assertRefundPercentage(data.percentage);
     // Serializable so a concurrent request (an admin refund racing a member
     // cancellation) cannot replace a refund queued after this one read it.
@@ -571,10 +569,17 @@ export class RegistrationService {
         where: { id: data.paymentId },
       });
       if (!payment) throw new RpcError(404, 'Payment not found');
+      // A completed refund also marks the payment Refunded; repeating the
+      // request is a no-op rather than a conflict.
+      if (
+        payment.status === 'Refunded' ||
+        payment.refundStatus === 'Succeeded'
+      ) {
+        return payment;
+      }
       if (payment.status !== 'Paid') {
         throw new RpcError(409, 'Only paid payments can be refunded');
       }
-      if (payment.refundStatus === 'Succeeded') return payment;
       if (
         payment.refundStatus === 'Pending' &&
         payment.refundPercentage !== data.percentage
@@ -589,6 +594,8 @@ export class RegistrationService {
   }
 
   async beginClassRefunds(classId: number) {
+    // Without this check an undefined id would refund every class.
+    assertRecordId(classId, 'Class');
     const payments = await this.prisma.client.payment.findMany({
       where: { classId, status: 'Paid', refundStatus: 'None' },
     });
@@ -609,43 +616,77 @@ export class RegistrationService {
     stripeRefundId?: string;
     amountCents: number;
   }) {
-    const payment = await this.prisma.client.payment.findUnique({
-      where: { id: data.paymentId },
-    });
-    if (!payment) throw new RpcError(404, 'Payment not found');
-    if (payment.refundAmountCents !== data.amountCents) {
-      throw new RpcError(409, 'Stripe refund amount does not match payment');
-    }
-    if (
-      payment.stripeRefundId &&
-      data.stripeRefundId &&
-      payment.stripeRefundId !== data.stripeRefundId
-    ) {
-      throw new RpcError(409, 'Stripe refund does not match payment');
-    }
-    return this.prisma.client.payment.update({
-      where: { id: data.paymentId },
-      data: {
-        status: 'Refunded',
-        refundStatus: 'Succeeded',
-        stripeRefundId: data.stripeRefundId ?? payment.stripeRefundId,
-        refundedAt: new Date(),
-        refundError: null,
-      },
-    });
-  }
-
-  recordPaymentRefund(paymentId: string, stripeRefundId: string) {
-    return this.prisma.client.payment.update({
-      where: { id: paymentId },
-      data: { stripeRefundId },
+    assertKey(data.paymentId, 'Payment');
+    return this.runSerializable(async (tx) => {
+      const payment = await tx.payment.findUnique({
+        where: { id: data.paymentId },
+      });
+      if (!payment) throw new RpcError(404, 'Payment not found');
+      if (payment.refundAmountCents !== data.amountCents) {
+        throw new RpcError(409, 'Stripe refund amount does not match payment');
+      }
+      if (
+        payment.stripeRefundId &&
+        data.stripeRefundId &&
+        payment.stripeRefundId !== data.stripeRefundId
+      ) {
+        throw new RpcError(409, 'Stripe refund does not match payment');
+      }
+      // Stripe reports one refund through several webhooks.
+      if (payment.refundStatus === 'Succeeded') return payment;
+      return tx.payment.update({
+        where: { id: data.paymentId },
+        data: {
+          status: 'Refunded',
+          refundStatus: 'Succeeded',
+          stripeRefundId: data.stripeRefundId ?? payment.stripeRefundId,
+          refundedAt: new Date(),
+          refundError: null,
+        },
+      });
     });
   }
 
-  failPaymentRefund(paymentId: string, error: string) {
-    return this.prisma.client.payment.update({
-      where: { id: paymentId },
-      data: { refundStatus: 'Failed', refundError: error.slice(0, 500) },
+  async recordPaymentRefund(paymentId: string, stripeRefundId: string) {
+    assertKey(paymentId, 'Payment');
+    assertKey(stripeRefundId, 'Stripe refund');
+    return this.runSerializable(async (tx) => {
+      const payment = await tx.payment.findUnique({
+        where: { id: paymentId },
+      });
+      if (!payment) throw new RpcError(404, 'Payment not found');
+      // The refund webhook may already have completed it.
+      if (!isRefundInFlight(payment.refundStatus)) return payment;
+      return tx.payment.update({
+        where: { id: paymentId },
+        data: {
+          stripeRefundId,
+          // Stripe accepted the refund, so an earlier failure no longer
+          // applies.
+          refundStatus: 'Pending',
+          refundError: null,
+        },
+      });
+    });
+  }
+
+  async failPaymentRefund(paymentId: string, error: string) {
+    assertKey(paymentId, 'Payment');
+    return this.runSerializable(async (tx) => {
+      const payment = await tx.payment.findUnique({
+        where: { id: paymentId },
+      });
+      if (!payment) throw new RpcError(404, 'Payment not found');
+      // A late or duplicate failure report must not undo a finished refund,
+      // nor mark one that was never requested.
+      if (!isRefundInFlight(payment.refundStatus)) return payment;
+      return tx.payment.update({
+        where: { id: paymentId },
+        data: {
+          refundStatus: 'Failed',
+          refundError: errorMessage(error) ?? 'Refund failed',
+        },
+      });
     });
   }
 
@@ -668,6 +709,8 @@ export class RegistrationService {
     stripeEventId: string;
     eventType: string;
   }) {
+    assertKey(data.stripeEventId, 'Stripe event');
+    assertKey(data.eventType, 'Stripe event type');
     try {
       const event = await this.prisma.client.stripeWebhookEvent.create({
         data: { stripeEventId: data.stripeEventId, eventType: data.eventType },
@@ -682,17 +725,19 @@ export class RegistrationService {
     }
   }
 
-  completeStripeWebhookEvent(stripeEventId: string) {
+  async completeStripeWebhookEvent(stripeEventId: string) {
+    assertKey(stripeEventId, 'Stripe event');
     return this.prisma.client.stripeWebhookEvent.update({
       where: { stripeEventId },
       data: { status: 'Processed', processedAt: new Date(), error: null },
     });
   }
 
-  failStripeWebhookEvent(stripeEventId: string, error: string) {
+  async failStripeWebhookEvent(stripeEventId: string, error: string) {
+    assertKey(stripeEventId, 'Stripe event');
     return this.prisma.client.stripeWebhookEvent.update({
       where: { stripeEventId },
-      data: { status: 'Failed', error: error.slice(0, 500) },
+      data: { status: 'Failed', error: errorMessage(error) },
     });
   }
 
@@ -839,6 +884,9 @@ export class RegistrationService {
   ) {
     assertRecordId(id, 'Registration');
     assertCapacity(options.capacity);
+    if (options.refundPercentage !== undefined) {
+      assertRefundPercentage(options.refundPercentage);
+    }
     const cutoffHours = options.cancellationCutoffHours ?? 24;
     if (!Number.isInteger(cutoffHours) || cutoffHours < 0) {
       throw new RpcError(400, 'Cancellation cutoff is invalid');
@@ -893,7 +941,6 @@ export class RegistrationService {
         options.refundPercentage !== undefined &&
         current.status === 'Registered'
       ) {
-        assertRefundPercentage(options.refundPercentage);
         const payment = await tx.payment.findFirst({
           where: {
             classId: current.classId,

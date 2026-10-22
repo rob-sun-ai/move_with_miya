@@ -72,45 +72,6 @@ describe('RegistrationService payments', () => {
     service = new RegistrationService({ client: prisma } as never);
   });
 
-  describe('getClassPaymentAvailability', () => {
-    it.each([0, -1, 1.5])('rejects capacity %p', async (capacity) => {
-      await expect(
-        service.getClassPaymentAvailability(10, capacity),
-      ).rejects.toMatchObject({ message: 'Class capacity is invalid' });
-    });
-
-    it('counts registrations and unexpired pending checkouts', async () => {
-      prisma.registration.count.mockResolvedValue(6);
-      prisma.payment.count.mockResolvedValue(3);
-
-      await expect(
-        service.getClassPaymentAvailability(10, 10),
-      ).resolves.toEqual({
-        classId: 10,
-        capacity: 10,
-        registered: 6,
-        pending: 3,
-        available: 1,
-      });
-      expect(prisma.payment.count).toHaveBeenCalledWith({
-        where: {
-          classId: 10,
-          status: 'Pending',
-          expiresAt: { gt: expect.any(Date) as unknown },
-        },
-      });
-    });
-
-    it('never reports negative availability', async () => {
-      prisma.registration.count.mockResolvedValue(10);
-      prisma.payment.count.mockResolvedValue(2);
-
-      await expect(
-        service.getClassPaymentAvailability(10, 10),
-      ).resolves.toMatchObject({ available: 0 });
-    });
-  });
-
   describe('createOrGetPendingPayment', () => {
     const input = {
       userId: 'user-1',
@@ -130,6 +91,9 @@ describe('RegistrationService payments', () => {
       [{ userId: '' }, 'Payment owner or class is invalid'],
       [{ classId: 0 }, 'Payment owner or class is invalid'],
       [{ classId: 1.5 }, 'Payment owner or class is invalid'],
+      [{ capacity: undefined as never }, 'Class capacity is invalid'],
+      [{ capacity: 0 }, 'Class capacity is invalid'],
+      [{ amountCents: 2 ** 31 }, 'Payment amount is invalid'],
       [{ expiresAt: 'not a date' }, 'Payment expiration is invalid'],
       [{ expiresAt: PAST }, 'Payment expiration is invalid'],
     ])('rejects %o', async (overrides, message) => {
@@ -259,6 +223,20 @@ describe('RegistrationService payments', () => {
       ).rejects.toMatchObject({ code: 'P2034' });
     });
 
+    it('returns the checkout a concurrent request created', async () => {
+      const pending = paymentRecord();
+      prisma.payment.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(pending);
+      // The partial unique index rejects the second active payment.
+      prisma.payment.create.mockRejectedValueOnce({ code: 'P2002' });
+
+      await expect(service.createOrGetPendingPayment(input)).resolves.toBe(
+        pending,
+      );
+      expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    });
+
     it('does not retry other transaction errors', async () => {
       prisma.$transaction.mockRejectedValue(new Error('connection lost'));
 
@@ -279,61 +257,107 @@ describe('RegistrationService payments', () => {
       });
     });
 
+    const attach = () =>
+      service.attachCheckoutSession({
+        paymentId: 'payment-1',
+        stripeCheckoutSessionId: 'cs_1',
+      });
+
     it('rejects an unknown payment', async () => {
+      prisma.payment.updateMany.mockResolvedValue({ count: 0 });
       prisma.payment.findUnique.mockResolvedValue(null);
 
-      await expect(
-        service.attachCheckoutSession({
-          paymentId: 'missing',
-          stripeCheckoutSessionId: 'cs_1',
-        }),
-      ).rejects.toMatchObject({ message: 'Payment not found' });
+      await expect(attach()).rejects.toMatchObject({
+        message: 'Payment not found',
+      });
     });
 
     it('refuses to replace a different session', async () => {
+      prisma.payment.updateMany.mockResolvedValue({ count: 0 });
       prisma.payment.findUnique.mockResolvedValue(
         paymentRecord({ stripeCheckoutSessionId: 'cs_other' }),
       );
 
-      await expect(
-        service.attachCheckoutSession({
-          paymentId: 'payment-1',
-          stripeCheckoutSessionId: 'cs_1',
-        }),
-      ).rejects.toMatchObject({
+      await expect(attach()).rejects.toMatchObject({
         message: 'Payment already has a Checkout session',
       });
     });
 
-    it.each([null, 'cs_1'])(
-      'attaches the session when the current one is %p',
-      async (current) => {
-        prisma.payment.findUnique.mockResolvedValue(
-          paymentRecord({ stripeCheckoutSessionId: current }),
-        );
+    it('refuses a payment that is no longer pending', async () => {
+      prisma.payment.updateMany.mockResolvedValue({ count: 0 });
+      prisma.payment.findUnique.mockResolvedValue(
+        paymentRecord({ status: 'Expired', stripeCheckoutSessionId: null }),
+      );
 
-        await service.attachCheckoutSession({
-          paymentId: 'payment-1',
-          stripeCheckoutSessionId: 'cs_1',
-        });
-        expect(prisma.payment.update).toHaveBeenCalledWith({
-          where: { id: 'payment-1' },
-          data: { stripeCheckoutSessionId: 'cs_1' },
-        });
-      },
-    );
+      await expect(attach()).rejects.toMatchObject({
+        message: 'Payment is no longer pending',
+      });
+    });
+
+    it('attaches the session atomically to a pending payment without a different one', async () => {
+      const attached = paymentRecord();
+      prisma.payment.updateMany.mockResolvedValue({ count: 1 });
+      prisma.payment.findUnique.mockResolvedValue(attached);
+
+      await expect(attach()).resolves.toBe(attached);
+      expect(prisma.payment.updateMany).toHaveBeenCalledWith({
+        where: {
+          id: 'payment-1',
+          status: 'Pending',
+          OR: [
+            { stripeCheckoutSessionId: null },
+            { stripeCheckoutSessionId: 'cs_1' },
+          ],
+        },
+        data: { stripeCheckoutSessionId: 'cs_1' },
+      });
+      expect(prisma.payment.update).not.toHaveBeenCalled();
+    });
   });
 
-  it('looks payments up by id, Checkout session, and PaymentIntent', async () => {
+  it('looks payments up by id and PaymentIntent', async () => {
     await service.getPaymentById('payment-1');
-    await service.getPaymentByCheckoutSession('cs_1');
     await service.getPaymentByPaymentIntent('pi_1');
 
     expect(prisma.payment.findUnique.mock.calls).toEqual([
       [{ where: { id: 'payment-1' } }],
-      [{ where: { stripeCheckoutSessionId: 'cs_1' } }],
       [{ where: { stripePaymentIntentId: 'pi_1' } }],
     ]);
+  });
+
+  describe('payload validation', () => {
+    // Prisma drops undefined filters, so each of these would otherwise
+    // reach every row.
+    it.each([
+      [
+        'markPaymentFailed',
+        () => service.markPaymentFailed(undefined as never),
+      ],
+      [
+        'markPaymentExpired',
+        () => service.markPaymentExpired(undefined as never),
+      ],
+      [
+        'beginClassRefunds',
+        () => service.beginClassRefunds(undefined as never),
+      ],
+      ['getPaymentById', () => service.getPaymentById('')],
+      [
+        'getPaymentStatusForUser',
+        () => service.getPaymentStatusForUser('cs_1', undefined as never),
+      ],
+      [
+        'failPaymentRefund',
+        () => service.failPaymentRefund(undefined as never, 'declined'),
+      ],
+    ])('%s rejects a missing id before querying', async (_label, call) => {
+      await expect((call as () => Promise<unknown>)()).rejects.toMatchObject({
+        error: { statusCode: 400 },
+      });
+      expect(prisma.payment.updateMany).not.toHaveBeenCalled();
+      expect(prisma.payment.findMany).not.toHaveBeenCalled();
+      expect(prisma.payment.findUnique).not.toHaveBeenCalled();
+    });
   });
 
   describe('getPaymentStatusForUser', () => {
@@ -463,7 +487,7 @@ describe('RegistrationService payments', () => {
         expect(prisma.payment.update).not.toHaveBeenCalled();
       });
 
-      it('retries a failed refund without rewriting it', async () => {
+      it('leaves a failed partial refund to the retry sweep', async () => {
         prisma.payment.findUnique.mockResolvedValue(
           paymentRecord({
             status: 'Paid',
@@ -472,13 +496,18 @@ describe('RegistrationService payments', () => {
           }),
         );
 
+        // needsRefund would make the gateway re-request a full refund.
         await expect(
           service.finalizePaidRegistration({
             ...input,
             classStatus: 'Canceled',
           }),
-        ).resolves.toMatchObject({ needsRefund: true });
-        expect(prisma.payment.update).not.toHaveBeenCalled();
+        ).resolves.toMatchObject({ needsRefund: false });
+        expect(prisma.payment.update).toHaveBeenCalledTimes(1);
+        expect(prisma.payment.update).toHaveBeenCalledWith({
+          where: { id: 'payment-1' },
+          data: { stripePaymentIntentId: 'pi_1' },
+        });
       });
 
       it('keeps the original paid-at time and PaymentIntent', async () => {
@@ -527,6 +556,29 @@ describe('RegistrationService payments', () => {
       );
     });
 
+    it.each([
+      ['completed', { classStatus: 'Completed' }],
+      ['over', { classEndAt: PAST }],
+    ])(
+      'does not refund a fulfilled payment when the class is %s',
+      async (_label, overrides) => {
+        const registration = { id: 3, status: 'Registered' };
+        prisma.payment.findUnique.mockResolvedValue(
+          paymentRecord({
+            status: 'Paid',
+            registrationId: 3,
+            stripePaymentIntentId: 'pi_1',
+          }),
+        );
+        prisma.registration.findUnique.mockResolvedValue(registration);
+
+        await expect(
+          service.finalizePaidRegistration({ ...input, ...overrides }),
+        ).resolves.toMatchObject({ registration, needsRefund: false });
+        expect(prisma.payment.update).not.toHaveBeenCalled();
+      },
+    );
+
     it('returns an already fulfilled payment unchanged', async () => {
       const registration = { id: 3, status: 'Registered' };
       prisma.payment.findUnique.mockResolvedValue(
@@ -563,7 +615,7 @@ describe('RegistrationService payments', () => {
 
       await expect(
         service.finalizePaidRegistration(input),
-      ).resolves.toMatchObject({ needsRefund: true });
+      ).resolves.toMatchObject({ needsRefund: false });
       expect(prisma.payment.update).toHaveBeenCalledWith({
         where: { id: 'payment-1' },
         data: { stripePaymentIntentId: 'pi_1' },
@@ -581,7 +633,7 @@ describe('RegistrationService payments', () => {
 
       await expect(
         service.finalizePaidRegistration(input),
-      ).resolves.toMatchObject({ needsRefund: true });
+      ).resolves.toMatchObject({ needsRefund: false });
       expect(prisma.payment.update).not.toHaveBeenCalled();
     });
 
@@ -766,6 +818,19 @@ describe('RegistrationService payments', () => {
       expect(prisma.payment.update).not.toHaveBeenCalled();
     });
 
+    it('returns a payment already marked refunded instead of conflicting', async () => {
+      const refunded = paymentRecord({
+        status: 'Refunded',
+        refundStatus: 'Succeeded',
+      });
+      prisma.payment.findUnique.mockResolvedValue(refunded);
+
+      await expect(
+        service.beginPaymentRefund({ paymentId: 'payment-1', percentage: 50 }),
+      ).resolves.toBe(refunded);
+      expect(prisma.payment.update).not.toHaveBeenCalled();
+    });
+
     it('refuses to change a refund that is in progress', async () => {
       prisma.payment.findUnique.mockResolvedValue(
         paymentRecord({
@@ -933,6 +998,25 @@ describe('RegistrationService payments', () => {
       });
     });
 
+    it('does not rewrite a refund that already succeeded', async () => {
+      const refunded = paymentRecord({
+        status: 'Refunded',
+        refundStatus: 'Succeeded',
+        refundAmountCents: 2500,
+        stripeRefundId: 're_1',
+      });
+      prisma.payment.findUnique.mockResolvedValue(refunded);
+
+      await expect(
+        service.completePaymentRefund({
+          paymentId: 'payment-1',
+          stripeRefundId: 're_1',
+          amountCents: 2500,
+        }),
+      ).resolves.toBe(refunded);
+      expect(prisma.payment.update).not.toHaveBeenCalled();
+    });
+
     it('records the Stripe refund id on completion', async () => {
       prisma.payment.findUnique.mockResolvedValue(
         paymentRecord({ refundAmountCents: 2500 }),
@@ -952,23 +1036,64 @@ describe('RegistrationService payments', () => {
     });
   });
 
-  it('records a Stripe refund that is still processing', async () => {
-    await service.recordPaymentRefund('payment-1', 're_1');
+  describe('recordPaymentRefund', () => {
+    it('records a Stripe refund that is still processing', async () => {
+      prisma.payment.findUnique.mockResolvedValue(
+        paymentRecord({
+          status: 'Paid',
+          refundStatus: 'Failed',
+          refundError: 'timeout',
+        }),
+      );
 
-    expect(prisma.payment.update).toHaveBeenCalledWith({
-      where: { id: 'payment-1' },
-      data: expect.objectContaining({ stripeRefundId: 're_1' }) as unknown,
+      await service.recordPaymentRefund('payment-1', 're_1');
+
+      expect(prisma.payment.update).toHaveBeenCalledWith({
+        where: { id: 'payment-1' },
+        data: expect.objectContaining({
+          stripeRefundId: 're_1',
+          refundStatus: 'Pending',
+          refundError: null,
+        }) as unknown,
+      });
     });
+
+    it.each(['Succeeded', 'None', 'NotEligible'])(
+      'leaves a %s refund unchanged',
+      async (refundStatus) => {
+        const payment = paymentRecord({ status: 'Paid', refundStatus });
+        prisma.payment.findUnique.mockResolvedValue(payment);
+
+        await expect(
+          service.recordPaymentRefund('payment-1', 're_1'),
+        ).resolves.toBe(payment);
+        expect(prisma.payment.update).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe('refund retry bookkeeping', () => {
     it('marks a refund failed and truncates the error', async () => {
+      prisma.payment.findUnique.mockResolvedValue({
+        id: 'payment-1',
+        refundStatus: 'Pending',
+      });
       await service.failPaymentRefund('payment-1', 'r'.repeat(600));
 
       expect(prisma.payment.update).toHaveBeenCalledWith({
         where: { id: 'payment-1' },
         data: { refundStatus: 'Failed', refundError: 'r'.repeat(500) },
       });
+    });
+
+    it('ignores a failure report for a refund that is not in flight', async () => {
+      prisma.payment.findUnique.mockResolvedValue({
+        id: 'payment-1',
+        refundStatus: 'Succeeded',
+      });
+      await service.failPaymentRefund('payment-1', 'late');
+
+      expect(prisma.payment.update).not.toHaveBeenCalled();
     });
 
     it('lists pending and failed refunds, oldest first', async () => {
