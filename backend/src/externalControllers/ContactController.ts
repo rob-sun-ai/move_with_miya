@@ -18,15 +18,20 @@ import {
 } from '@nestjs/common';
 import { ClientProxy } from '@nestjs/microservices';
 import type { Request, Response } from 'express';
-import { lastValueFrom } from 'rxjs';
 import { AdminGuard } from '../common/guards/admin.guard';
 import { ContactRateLimitGuard } from '../common/guards/contact-rate-limit.guard';
+import { sendRpc } from '../common/rpc';
 import { CreateContactSubmissionDto } from './dto/create-contact-submission.dto';
 import { UpdateContactReadDto } from './dto/update-contact-read.dto';
 import { ContactEmailService } from './contact-email.service';
 import { ContactChallengeService } from './contact-challenge.service';
-import { ContactRateLimitService } from './contact-rate-limit.service';
+import {
+  ContactRateLimitService,
+  type RateLimitDecision,
+} from './contact-rate-limit.service';
 import { TurnstileService } from './turnstile.service';
+
+const MAX_PAGE_SIZE = 100;
 
 interface ContactSubmissionRecord {
   id: number;
@@ -85,7 +90,7 @@ export class ContactController {
       throw new BadRequestException('Captcha verification failed');
     }
 
-    let decision: import('./contact-rate-limit.service').RateLimitDecision;
+    let decision: RateLimitDecision;
     try {
       decision =
         await this.contactRateLimitService.consumeVerifiedSubmission(visitorId);
@@ -102,11 +107,9 @@ export class ContactController {
       );
     }
 
-    const submission = await lastValueFrom<ContactSubmissionRecord>(
-      this.registrationClient.send<ContactSubmissionRecord>(
-        { cmd: 'create_contact_submission' },
-        submissionDto,
-      ),
+    const submission = await this.rpc<ContactSubmissionRecord>(
+      'create_contact_submission',
+      submissionDto,
     );
     void this.contactEmailService.notify(submissionDto);
     return submission;
@@ -114,14 +117,22 @@ export class ContactController {
 
   @UseGuards(AdminGuard)
   @Get()
-  findAll(@Query('take') take?: string, @Query('skip') skip?: string) {
-    return this.registrationClient.send<ContactSubmissionRecord[]>(
-      { cmd: 'get_contact_submissions' },
-      {
-        take: take ? parseInt(take, 10) : undefined,
-        skip: skip ? parseInt(skip, 10) : undefined,
-      },
-    );
+  findAll(
+    @Query('take', new ParseIntPipe({ optional: true })) take?: number,
+    @Query('skip', new ParseIntPipe({ optional: true })) skip?: number,
+  ) {
+    if (take !== undefined && (take < 1 || take > MAX_PAGE_SIZE)) {
+      throw new BadRequestException(
+        `take must be between 1 and ${MAX_PAGE_SIZE}`,
+      );
+    }
+    if (skip !== undefined && skip < 0) {
+      throw new BadRequestException('skip must not be negative');
+    }
+    return this.rpc<ContactSubmissionRecord[]>('get_contact_submissions', {
+      take,
+      skip,
+    });
   }
 
   @UseGuards(AdminGuard)
@@ -130,9 +141,18 @@ export class ContactController {
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: UpdateContactReadDto,
   ) {
-    return this.registrationClient.send<ContactSubmissionRecord>(
-      { cmd: 'mark_contact_submission_read' },
-      { id, read: dto.read },
+    return this.rpc<ContactSubmissionRecord>('mark_contact_submission_read', {
+      id,
+      read: dto.read,
+    });
+  }
+
+  private rpc<T>(cmd: string, payload: object) {
+    return sendRpc<T>(
+      this.registrationClient,
+      cmd,
+      payload,
+      'Contact service is temporarily unavailable',
     );
   }
 }

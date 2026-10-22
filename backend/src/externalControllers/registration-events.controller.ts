@@ -19,10 +19,15 @@ export class RegistrationEventsController {
       await this.notifications.deliver(event);
       await this.notifications.complete(event.eventKey);
     } catch (error) {
-      await this.notifications.fail(
-        event.eventKey,
-        error instanceof Error ? error.message : 'Notification delivery failed',
-      );
+      // Rethrow the delivery error even when recording it fails too.
+      await this.notifications
+        .fail(
+          event.eventKey,
+          error instanceof Error
+            ? error.message
+            : 'Notification delivery failed',
+        )
+        .catch(() => undefined);
       throw error;
     }
   }

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   ConflictException,
   Controller,
@@ -14,8 +15,9 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ClientProxy } from '@nestjs/microservices';
-import { lastValueFrom } from 'rxjs';
 import { AdminGuard } from '../common/guards/admin.guard';
+import { sendRpc } from '../common/rpc';
+import { CancelClassDto } from './dto/cancel-class.dto';
 
 interface Teacher {
   id: string;
@@ -51,12 +53,22 @@ export class ClassesController {
     private readonly registrationClient: ClientProxy,
   ) {}
 
-  private async rpcClasses<T = unknown>(cmd: string, payload: object) {
-    return lastValueFrom<T>(this.classesClient.send<T>({ cmd }, payload));
+  private rpcClasses<T = unknown>(cmd: string, payload: object) {
+    return sendRpc<T>(
+      this.classesClient,
+      cmd,
+      payload,
+      'Class service unavailable',
+    );
   }
 
-  private async rpcRegistrations<T = unknown>(cmd: string, payload: object) {
-    return lastValueFrom<T>(this.registrationClient.send<T>({ cmd }, payload));
+  private rpcRegistrations<T = unknown>(cmd: string, payload: object) {
+    return sendRpc<T>(
+      this.registrationClient,
+      cmd,
+      payload,
+      'Registration service unavailable',
+    );
   }
 
   private async enrichClasses(classes: ClassRecord[]): Promise<ClassRecord[]> {
@@ -106,9 +118,14 @@ export class ClassesController {
 
   @Get('range')
   async findClassesInRange(
-    @Query('from') from: string,
-    @Query('to') to: string,
+    @Query('from') from?: unknown,
+    @Query('to') to?: unknown,
   ) {
+    // A repeated query parameter arrives as an array. The classes service
+    // validates the date format itself and replies 400 when it is wrong.
+    if (typeof from !== 'string' || typeof to !== 'string') {
+      throw new BadRequestException('from and to are required');
+    }
     const classes = await this.rpcClasses<ClassRecord[]>(
       'get_classes_in_range',
       { from, to },
@@ -133,7 +150,7 @@ export class ClassesController {
   @Post(':id/cancel')
   async cancelClass(
     @Param('id', ParseIntPipe) id: number,
-    @Body() body: { reason?: string },
+    @Body() body: CancelClassDto,
   ) {
     const cls = await this.rpcClasses<ClassRecord | null>('get_class', { id });
     if (!cls) throw new NotFoundException(`Class ${id} not found`);
@@ -172,8 +189,12 @@ export class ClassesController {
       id,
     });
     if (!current) throw new NotFoundException(`Class ${id} not found`);
+    // Canceling also cancels registrations and refunds payments; routing it
+    // through here would silently drop the rest of the edit.
     if (body.status === 'Canceled' && current.status !== 'Canceled') {
-      return this.cancelClass(id, {});
+      throw new BadRequestException(
+        'Use POST /classes/:id/cancel to cancel a class',
+      );
     }
 
     if ('capacity' in body) {

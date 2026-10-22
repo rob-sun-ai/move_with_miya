@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import { ClientProxy } from '@nestjs/microservices';
 import { AdminGuard } from '../common/guards/admin.guard';
+import { sendRpc } from '../common/rpc';
 
 @Controller('locations')
 export class LocationController {
@@ -19,20 +20,29 @@ export class LocationController {
     @Inject('CLASSES_SERVICE') private readonly classesClient: ClientProxy,
   ) {}
 
+  private rpc(cmd: string, payload: object) {
+    return sendRpc(
+      this.classesClient,
+      cmd,
+      payload,
+      'Class service unavailable',
+    );
+  }
+
   @Get()
   findLocations() {
-    return this.classesClient.send({ cmd: 'get_locations' }, {});
+    return this.rpc('get_locations', {});
   }
 
   @Get(':id')
   findLocation(@Param('id', ParseIntPipe) id: number) {
-    return this.classesClient.send({ cmd: 'get_location' }, { id });
+    return this.rpc('get_location', { id });
   }
 
   @UseGuards(AdminGuard)
   @Post()
   createLocation(@Body() body: Record<string, unknown>) {
-    return this.classesClient.send({ cmd: 'create_location' }, body);
+    return this.rpc('create_location', body);
   }
 
   @UseGuards(AdminGuard)
@@ -41,12 +51,12 @@ export class LocationController {
     @Param('id', ParseIntPipe) id: number,
     @Body() body: Record<string, unknown>,
   ) {
-    return this.classesClient.send({ cmd: 'update_location' }, { ...body, id });
+    return this.rpc('update_location', { ...body, id });
   }
 
   @UseGuards(AdminGuard)
   @Delete(':id')
   deleteLocation(@Param('id', ParseIntPipe) id: number) {
-    return this.classesClient.send({ cmd: 'delete_location' }, { id });
+    return this.rpc('delete_location', { id });
   }
 }

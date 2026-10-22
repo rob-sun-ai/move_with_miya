@@ -1,5 +1,8 @@
 import { NestFactory } from '@nestjs/core';
-import { NestExpressApplication } from '@nestjs/platform-express';
+import {
+  ExpressAdapter,
+  NestExpressApplication,
+} from '@nestjs/platform-express';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MicroserviceOptions, Transport } from '@nestjs/microservices';
@@ -7,6 +10,7 @@ import session from 'express-session';
 import { AppModule } from './app.module';
 import { RedisService } from './redis.service';
 import type { RedisClient } from './redis.service';
+import { createExpressServer } from './express-server';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { RedisStore } = require('connect-redis') as {
@@ -16,14 +20,17 @@ const { RedisStore } = require('connect-redis') as {
 };
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(
+    AppModule,
+    new ExpressAdapter(createExpressServer()),
+  );
   const configService = app.get(ConfigService);
 
   app.connectMicroservice<MicroserviceOptions>({
     transport: Transport.RMQ,
     options: {
       urls: [
-        configService.get<string>('RABBITMQ_URL', 'amqp://localhost:5672'),
+        configService.get<string>('RABBITMQ_URL') || 'amqp://localhost:5672',
       ],
       queue: 'registration_events',
       queueOptions: { durable: true },

@@ -1,14 +1,16 @@
 import { Test } from '@nestjs/testing';
-import { of, throwError } from 'rxjs';
+import { NEVER, of, throwError } from 'rxjs';
 import {
   ConflictException,
   NotFoundException,
   BadRequestException,
-  InternalServerErrorException,
+  ServiceUnavailableException,
   UnauthorizedException,
   ForbiddenException,
 } from '@nestjs/common';
+import { ValidationPipe } from '@nestjs/common';
 import { RegistrationController } from './RegistrationController';
+import { UpdateRegistrationDto } from './dto/update-registration.dto';
 
 jest.mock('../common/guards/admin.guard', () => ({
   AdminGuard: jest.fn().mockImplementation(() => ({ canActivate: () => true })),
@@ -83,11 +85,28 @@ describe('RegistrationController', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
-    it('maps unknown errors to InternalServerErrorException', async () => {
+    it('maps unknown errors to ServiceUnavailableException without their details', async () => {
       client.send.mockReturnValue(throwError(() => ({ message: 'boom' })));
       await expect(
         controller['rpc']('update_registration', { id: 1 }),
-      ).rejects.toThrow(InternalServerErrorException);
+      ).rejects.toEqual(
+        new ServiceUnavailableException('Registration service unavailable'),
+      );
+    });
+
+    it('gives up on a registration service that never replies', async () => {
+      jest.useFakeTimers();
+      try {
+        client.send.mockReturnValue(NEVER);
+        const result = controller['rpc']('get_registration', { id: 1 });
+        const assertion = expect(result).rejects.toEqual(
+          new ServiceUnavailableException('Registration service unavailable'),
+        );
+        await jest.advanceTimersByTimeAsync(10_000);
+        await assertion;
+      } finally {
+        jest.useRealTimers();
+      }
     });
 
     it('propagates successful values', async () => {
@@ -289,6 +308,84 @@ describe('RegistrationController', () => {
         { cmd: 'get_all_registrations' },
         {},
       );
+    });
+  });
+
+  describe('member registration listing', () => {
+    it('attaches class details but no user profiles', async () => {
+      const registration = {
+        id: 9,
+        classId: 3,
+        userId: sessionUserId,
+        status: 'Registered',
+        registeredAt: '2026-09-01T10:00:00.000Z',
+      };
+      const cls = {
+        id: 3,
+        name: 'Morning Flow',
+        startDate: '2026-09-05T10:00:00.000Z',
+        endDate: '2026-09-05T11:00:00.000Z',
+      };
+      client.send.mockReturnValue(
+        of([registration, { ...registration, id: 10, classId: 99 }]),
+      );
+      classesClient.send.mockReturnValue(of([cls]));
+
+      await expect(
+        controller.getMyRegistrations(buildRequest(sessionUserId)),
+      ).resolves.toEqual([
+        { ...registration, class: cls },
+        { ...registration, id: 10, classId: 99, class: null },
+      ]);
+      expect(client.send).toHaveBeenCalledWith(
+        { cmd: 'get_registrations_by_user' },
+        { userId: sessionUserId },
+      );
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('still lists registrations when the class service is down', async () => {
+      const registration = { id: 9, classId: 3, userId: sessionUserId };
+      client.send.mockReturnValue(of([registration]));
+      classesClient.send.mockReturnValue(throwError(() => new Error('down')));
+
+      await expect(
+        controller.getMyRegistrations(buildRequest(sessionUserId)),
+      ).resolves.toEqual([{ ...registration, class: null }]);
+    });
+  });
+
+  describe('admin registration updates', () => {
+    it('always updates the registration named in the route', async () => {
+      client.send.mockReturnValue(of({ id: 5 }));
+
+      await controller.updateRegistration(5, {
+        id: 7,
+        cancellationReason: 'Moved',
+      } as never);
+
+      expect(client.send).toHaveBeenCalledWith(
+        { cmd: 'update_registration' },
+        { id: 5, cancellationReason: 'Moved' },
+      );
+    });
+
+    it('accepts only the editable fields', async () => {
+      const pipe = new ValidationPipe({ whitelist: true, transform: true });
+      const metadata = {
+        type: 'body' as const,
+        metatype: UpdateRegistrationDto,
+      };
+
+      await expect(
+        pipe.transform(
+          { cancellationReason: 'Moved', classId: 4, userId: 'other' },
+          metadata,
+        ),
+      ).resolves.toEqual({ cancellationReason: 'Moved' });
+      await expect(
+        pipe.transform({ cancellationReason: 4 }, metadata),
+      ).rejects.toThrow(BadRequestException);
     });
   });
 });

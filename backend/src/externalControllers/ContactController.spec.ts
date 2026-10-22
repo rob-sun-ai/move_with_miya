@@ -1,7 +1,10 @@
-import { BadRequestException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import type { Request, Response } from 'express';
-import { lastValueFrom, of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import { ContactRateLimitGuard } from '../common/guards/contact-rate-limit.guard';
 import { ContactController } from './ContactController';
 import { ContactChallengeService } from './contact-challenge.service';
@@ -209,12 +212,52 @@ describe('ContactController', () => {
     const updated = { id: 4, read: true };
     client.send.mockReturnValue(of(updated));
 
-    await expect(
-      lastValueFrom(controller.markRead(4, { read: true })),
-    ).resolves.toEqual(updated);
+    await expect(controller.markRead(4, { read: true })).resolves.toEqual(
+      updated,
+    );
     expect(client.send).toHaveBeenCalledWith(
       { cmd: 'mark_contact_submission_read' },
       { id: 4, read: true },
     );
+  });
+
+  it('lists submissions with optional paging', async () => {
+    client.send.mockReturnValue(of([]));
+
+    await expect(controller.findAll()).resolves.toEqual([]);
+    await controller.findAll(20, 40);
+
+    expect(client.send).toHaveBeenNthCalledWith(
+      1,
+      { cmd: 'get_contact_submissions' },
+      { take: undefined, skip: undefined },
+    );
+    expect(client.send).toHaveBeenNthCalledWith(
+      2,
+      { cmd: 'get_contact_submissions' },
+      { take: 20, skip: 40 },
+    );
+  });
+
+  it.each([
+    [0, undefined],
+    [101, undefined],
+    [10, -1],
+  ])('rejects take %p with skip %p', (take, skip) => {
+    expect(() => controller.findAll(take, skip)).toThrow(BadRequestException);
+    expect(client.send).not.toHaveBeenCalled();
+  });
+
+  it('reports an unavailable registration service when saving fails', async () => {
+    client.send.mockReturnValue(
+      throwError(() => ({ status: 'error', message: 'Internal server error' })),
+    );
+
+    await expect(controller.create(dto, request(), response)).rejects.toEqual(
+      new ServiceUnavailableException(
+        'Contact service is temporarily unavailable',
+      ),
+    );
+    expect(emailService.notify).not.toHaveBeenCalled();
   });
 });
