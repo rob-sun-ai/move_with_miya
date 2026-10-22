@@ -83,47 +83,6 @@ function assertRefundPercentage(percentage: number) {
   }
 }
 
-/** A refund that was requested and has not succeeded yet. */
-function isRefundInFlight(refundStatus: string) {
-  return refundStatus === 'Pending' || refundStatus === 'Failed';
-}
-
-/** Automatic refund retries stop after this many failures. */
-export const MAX_REFUND_ATTEMPTS = 10;
-
-/** Failed refunds the retry sweep has given up on; an admin must act. */
-export const REFUND_NEEDS_ATTENTION_WHERE = {
-  refundStatus: 'Failed' as const,
-  refundAttempts: { gte: MAX_REFUND_ATTEMPTS },
-};
-
-/**
- * How long a refund sweep owns the refunds it claimed. Long enough for one
- * sweep to finish; a crashed sweeper's claims become due again afterwards.
- */
-const REFUND_CLAIM_LEASE_MS = 15 * 60_000;
-
-/** Exponential backoff between refund retries: 2, 4, … 256 minutes. */
-function refundRetryDelayMs(attempts: number) {
-  return 2 ** Math.min(attempts, 8) * 60_000;
-}
-
-/** Payment fields that request a refund of `percentage` of the amount paid. */
-function refundRequest(amountCents: number, percentage: number) {
-  const refundAmountCents = Math.floor((amountCents * percentage) / 100);
-  return {
-    refundPercentage: percentage,
-    refundAmountCents,
-    refundRequestedAt: new Date(),
-    refundStatus:
-      refundAmountCents > 0 ? ('Pending' as const) : ('NotEligible' as const),
-    refundError: null,
-    // A new request is retried immediately with a fresh attempt budget.
-    refundAttempts: 0,
-    refundAvailableAt: new Date(),
-  };
-}
-
 const SERIALIZABLE_MAX_ATTEMPTS = 5;
 
 /**
@@ -164,6 +123,47 @@ const EDITABLE_REGISTRATION_FIELDS = new Set(['cancellationReason']);
 const NOTIFICATION_LEASE_MS = 5 * 60 * 1_000;
 
 const MAX_CONTACT_PAGE_SIZE = 100;
+
+/** Automatic refund retries stop after this many failures. */
+export const MAX_REFUND_ATTEMPTS = 10;
+
+/** Failed refunds the retry sweep has given up on; an admin must act. */
+export const REFUND_NEEDS_ATTENTION_WHERE = {
+  refundStatus: 'Failed' as const,
+  refundAttempts: { gte: MAX_REFUND_ATTEMPTS },
+};
+
+/**
+ * How long a refund sweep owns the refunds it claimed. Long enough for one
+ * sweep to finish; a crashed sweeper's claims become due again afterwards.
+ */
+const REFUND_CLAIM_LEASE_MS = 15 * 60_000;
+
+/** Exponential backoff between refund retries: 2, 4, … 256 minutes. */
+function refundRetryDelayMs(attempts: number) {
+  return 2 ** Math.min(attempts, 8) * 60_000;
+}
+
+/** A refund that was requested and has not succeeded yet. */
+function isRefundInFlight(refundStatus: string) {
+  return refundStatus === 'Pending' || refundStatus === 'Failed';
+}
+
+/** Payment fields that request a refund of `percentage` of the amount paid. */
+function refundRequest(amountCents: number, percentage: number) {
+  const refundAmountCents = Math.floor((amountCents * percentage) / 100);
+  return {
+    refundPercentage: percentage,
+    refundAmountCents,
+    refundRequestedAt: new Date(),
+    refundStatus:
+      refundAmountCents > 0 ? ('Pending' as const) : ('NotEligible' as const),
+    refundError: null,
+    // A new request is retried immediately with a fresh attempt budget.
+    refundAttempts: 0,
+    refundAvailableAt: new Date(),
+  };
+}
 
 @Injectable()
 export class RegistrationService {

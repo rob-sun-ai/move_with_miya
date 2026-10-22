@@ -1152,7 +1152,10 @@ describe('RegistrationService payments', () => {
     );
 
     it('truncates long refund errors', async () => {
-      prisma.payment.findUnique.mockResolvedValue({ refundAttempts: 0 });
+      prisma.payment.findUnique.mockResolvedValue({
+        refundStatus: 'Pending',
+        refundAttempts: 0,
+      });
 
       await service.failPaymentRefund('payment-1', 'r'.repeat(600));
 
@@ -1165,19 +1168,18 @@ describe('RegistrationService payments', () => {
       );
     });
 
-    it('never turns a succeeded refund back into a failure', async () => {
-      const succeeded = paymentRecord({
-        status: 'Refunded',
-        refundStatus: 'Succeeded',
-        refundAttempts: 2,
-      });
-      prisma.payment.findUnique.mockResolvedValue(succeeded);
+    it.each(['Succeeded', 'None', 'NotEligible'])(
+      'ignores a late failure report for a %s refund',
+      async (refundStatus) => {
+        const payment = paymentRecord({ refundStatus, refundAttempts: 2 });
+        prisma.payment.findUnique.mockResolvedValue(payment);
 
-      await expect(
-        service.failPaymentRefund('payment-1', 'late refund.failed'),
-      ).resolves.toBe(succeeded);
-      expect(prisma.payment.update).not.toHaveBeenCalled();
-    });
+        await expect(
+          service.failPaymentRefund('payment-1', 'late refund.failed'),
+        ).resolves.toBe(payment);
+        expect(prisma.payment.update).not.toHaveBeenCalled();
+      },
+    );
 
     it('retries a failure report that conflicts with a concurrent one', async () => {
       prisma.$transaction.mockRejectedValueOnce({ code: 'P2034' });
@@ -1186,7 +1188,10 @@ describe('RegistrationService payments', () => {
         refundAttempts: 4,
       });
 
-      await service.failPaymentRefund('payment-1', 'declined');
+      const failed = service.failPaymentRefund('payment-1', 'declined');
+      // The retry waits a jittered delay on the fake clock.
+      await jest.runAllTimersAsync();
+      await failed;
 
       expect(prisma.$transaction).toHaveBeenCalledTimes(2);
       expect(prisma.payment.update).toHaveBeenCalledWith(
@@ -1206,12 +1211,18 @@ describe('RegistrationService payments', () => {
     });
 
     it('re-checks a refund Stripe is still processing after an hour', async () => {
+      prisma.payment.findUnique.mockResolvedValue(
+        paymentRecord({ status: 'Paid', refundStatus: 'Pending' }),
+      );
+
       await service.recordPaymentRefund('payment-1', 're_1');
 
       expect(prisma.payment.update).toHaveBeenCalledWith({
         where: { id: 'payment-1' },
         data: {
           stripeRefundId: 're_1',
+          refundStatus: 'Pending',
+          refundError: null,
           refundAvailableAt: at('2026-09-27T13:00:00.000Z'),
         },
       });
