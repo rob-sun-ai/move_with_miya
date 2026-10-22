@@ -25,33 +25,13 @@ import TextField from '@mui/material/TextField';
 import Link from 'next/link';
 import { format } from 'date-fns';
 import { api } from '@/lib/api';
-import type { Registration, YogaClass } from '@/lib/types';
-
-interface Registrant {
-  id: number;
-  userId: string;
-  classId: number;
-  status: string;
-  registeredAt: string;
-  user?: {
-    id: string;
-    firstName: string;
-    lastName: string;
-    avatarUrl?: string | null;
-    role: string;
-  } | null;
-}
+import { formatCost, fullName, locationLabel } from '@/lib/format';
+import type { AuthUser, Registration, YogaClass } from '@/lib/types';
 
 interface ClassDetailClientProps {
   cls: YogaClass;
-  user?: import('@/lib/types').AuthUser | null;
-  registrants?: Registrant[] | null;
-}
-
-function formatCost(cost: string): string {
-  const amount = Number(cost);
-  if (Number.isNaN(amount) || amount === 0) return 'Free';
-  return `$${amount.toFixed(2)}`;
+  user?: AuthUser | null;
+  registrants?: Registration[] | null;
 }
 
 export default function ClassDetailClient({
@@ -73,8 +53,7 @@ export default function ClassDetailClient({
     Boolean(user?.yogaExperience?.trim()),
   );
 
-  const locationName =
-    cls.location.name ?? `${cls.location.city}, ${cls.location.state}`;
+  const locationName = locationLabel(cls.location);
   const teachers = cls.teachers ?? [];
   // eslint-disable-next-line react-hooks/purity -- time comparison must reflect "now"
   const hasEnded = new Date(cls.endDate).getTime() < Date.now();
@@ -227,14 +206,12 @@ export default function ClassDetailClient({
                   <Avatar
                     key={t.id}
                     src={t.avatarUrl ?? undefined}
-                    alt={`${t.firstName} ${t.lastName}`}
+                    alt={fullName(t)}
                   />
                 ))}
               </AvatarGroup>
               <Typography variant="body2" color="text.secondary">
-                {teachers
-                  .map((t) => `${t.firstName} ${t.lastName}`.trim())
-                  .join(', ')}
+                {teachers.map(fullName).join(', ')}
               </Typography>
             </>
           ) : (
@@ -335,11 +312,7 @@ export default function ClassDetailClient({
                         <Avatar src={r.user?.avatarUrl ?? undefined} />
                       </ListItemAvatar>
                       <ListItemText
-                        primary={
-                          r.user
-                            ? `${r.user.firstName} ${r.user.lastName}`.trim()
-                            : r.userId
-                        }
+                        primary={r.user ? fullName(r.user) : r.userId}
                         secondary={r.user ? r.user.role : undefined}
                       />
                     </ListItem>

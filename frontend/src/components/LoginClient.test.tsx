@@ -2,14 +2,14 @@ import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { render } from './test-utils';
-import LoginClient from './LoginClient';
+import LoginClient, { safeNextPath } from './LoginClient';
 
 const authMock = vi.hoisted(() => vi.fn());
-const pushMock = vi.hoisted(() => vi.fn());
+const replaceMock = vi.hoisted(() => vi.fn());
 const searchParamsMock = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/auth', () => ({ useAuth: authMock }));
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push: pushMock }),
+  useRouter: () => ({ replace: replaceMock }),
   useSearchParams: searchParamsMock,
 }));
 
@@ -35,6 +35,15 @@ describe('LoginClient', () => {
     expect(login).toHaveBeenCalledTimes(1);
   });
 
+  it('explains a failed sign-in attempt', () => {
+    authMock.mockReturnValue({ user: null, loading: false, login: vi.fn() });
+    searchParamsMock.mockReturnValue(new URLSearchParams('error=signin'));
+    render(<LoginClient />);
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Google sign-in did not complete.',
+    );
+  });
+
   it('redirects authenticated users to the requested destination', () => {
     authMock.mockReturnValue({
       user: { id: 'u1' },
@@ -43,6 +52,34 @@ describe('LoginClient', () => {
     });
     searchParamsMock.mockReturnValue(new URLSearchParams('next=%2Fclasses'));
     render(<LoginClient />);
-    expect(pushMock).toHaveBeenCalledWith('/classes');
+    expect(replaceMock).toHaveBeenCalledWith('/classes');
+  });
+
+  it('ignores a destination on another site', () => {
+    authMock.mockReturnValue({
+      user: { id: 'u1' },
+      loading: false,
+      login: vi.fn(),
+    });
+    searchParamsMock.mockReturnValue(
+      new URLSearchParams('next=https%3A%2F%2Fevil.test'),
+    );
+    render(<LoginClient />);
+    expect(replaceMock).toHaveBeenLastCalledWith('/dashboard');
+  });
+});
+
+describe('safeNextPath', () => {
+  it.each([
+    ['/classes/7?view=list#top', '/classes/7?view=list#top'],
+    [null, '/dashboard'],
+    ['', '/dashboard'],
+    ['https://evil.test', '/dashboard'],
+    ['//evil.test', '/dashboard'],
+    ['/\\evil.test', '/dashboard'],
+    ['/\t/evil.test', '/dashboard'],
+    ['javascript:alert(1)', '/dashboard'],
+  ])('maps %j to %j', (next, expected) => {
+    expect(safeNextPath(next)).toBe(expected);
   });
 });

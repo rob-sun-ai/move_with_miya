@@ -8,6 +8,7 @@ import Select from '@mui/material/Select';
 import Stack from '@mui/material/Stack';
 import { DatePicker } from '@mui/x-date-pickers/DatePicker';
 import { startOfDay } from 'date-fns';
+import { locationLabel } from '@/lib/format';
 import type { Location } from '@/lib/types';
 
 export type TimeframeFilter = 'upcoming' | 'finished' | 'all';
@@ -104,7 +105,7 @@ export default function FilterBar({
           <MenuItem value="">All locations</MenuItem>
           {locations.map((location) => (
             <MenuItem key={location.id} value={location.id}>
-              {location.name ?? `${location.city}, ${location.state}`}
+              {locationLabel(location)}
             </MenuItem>
           ))}
         </Select>

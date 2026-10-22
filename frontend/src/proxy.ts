@@ -3,26 +3,11 @@ import { USER_SERVICE_URL } from '@/lib/env';
 
 const SESSION_COOKIE = 'connect.sid';
 
-const PUBLIC_PATHS = ['/login', '/classes', '/'];
-
-function isPublicPath(pathname: string): boolean {
-  return PUBLIC_PATHS.some(
-    (p) => pathname === p || pathname.startsWith(`${p}/`),
-  );
-}
-
+// Gates the signed-in areas before they render. The pages and the API still
+// verify the session and role themselves; this only saves a round trip of
+// server rendering for visitors who are clearly signed out.
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
-
-  if (isPublicPath(pathname)) {
-    return NextResponse.next();
-  }
-
-  const cookieHeader = request.headers.get('cookie');
-  const hasSessionCookie =
-    cookieHeader
-      ?.split(';')
-      .some((c) => c.trim().startsWith(`${SESSION_COOKIE}=`)) ?? false;
 
   const redirectToLogin = () => {
     const url = new URL('/login', request.url);
@@ -30,13 +15,13 @@ export async function proxy(request: NextRequest) {
     return NextResponse.redirect(url);
   };
 
-  if (!hasSessionCookie) {
+  if (!request.cookies.has(SESSION_COOKIE)) {
     return redirectToLogin();
   }
 
   try {
     const res = await fetch(`${USER_SERVICE_URL}/auth/me`, {
-      headers: { cookie: cookieHeader as string },
+      headers: { cookie: request.headers.get('cookie') ?? '' },
       cache: 'no-store',
     });
     if (!res.ok) {

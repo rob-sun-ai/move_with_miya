@@ -3,8 +3,9 @@ import { cookies } from 'next/headers';
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import ClassBrowser from '@/components/ClassBrowser';
-import type { AuthUser, Registration, YogaClass } from '@/lib/types';
-import { BACKEND_URL, USER_SERVICE_URL } from '@/lib/env';
+import type { Registration, YogaClass } from '@/lib/types';
+import { BACKEND_URL } from '@/lib/env';
+import { getCurrentUser } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
 
@@ -38,28 +39,15 @@ async function fetchSessionData(cookieString: string): Promise<{
   registeredClassIds: number[];
   registrationStates: Record<number, string>;
 }> {
-  if (!cookieString) {
-    return {
-      currentUserId: null,
-      registeredClassIds: [],
-      registrationStates: {},
-    };
-  }
+  const signedOut = {
+    currentUserId: null,
+    registeredClassIds: [],
+    registrationStates: {},
+  };
+  const user = await getCurrentUser(cookieString);
+  if (!user) return signedOut;
 
   try {
-    const meRes = await fetch(`${USER_SERVICE_URL}/auth/me`, {
-      cache: 'no-store',
-      headers: { cookie: cookieString },
-    });
-    if (!meRes.ok) {
-      return {
-        currentUserId: null,
-        registeredClassIds: [],
-        registrationStates: {},
-      };
-    }
-    const user = (await meRes.json()) as AuthUser;
-
     const regRes = await fetch(`${BACKEND_URL}/registration/me`, {
       cache: 'no-store',
       headers: { cookie: cookieString },
@@ -83,11 +71,7 @@ async function fetchSessionData(cookieString: string): Promise<{
     };
   } catch (error) {
     console.error('Failed to load session data:', error);
-    return {
-      currentUserId: null,
-      registeredClassIds: [],
-      registrationStates: {},
-    };
+    return { ...signedOut, currentUserId: user.id };
   }
 }
 

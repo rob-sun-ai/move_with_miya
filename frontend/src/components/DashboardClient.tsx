@@ -2,8 +2,7 @@
 
 import { useState } from 'react';
 import { useAuth } from '@/lib/auth';
-import type { AuthUser } from '@/lib/types';
-import type { Registration } from '@/lib/types';
+import type { AuthUser, Registration } from '@/lib/types';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import Button from '@mui/material/Button';
@@ -90,7 +89,7 @@ export default function DashboardClient({
                 }}
               >
                 <Typography variant="body2">
-                  Class {registration.classId}
+                  {registration.class?.name ?? `Class ${registration.classId}`}
                 </Typography>
                 <Chip
                   label={registration.status}

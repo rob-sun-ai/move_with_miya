@@ -39,5 +39,8 @@ export async function api<T = unknown>(
     throw new ApiError(message, res.status);
   }
 
-  return res.json();
+  // Nest sends an empty 200 when a handler returns nothing, and 204 has no
+  // body at all; neither is a failure.
+  const text = await res.text();
+  return (text ? JSON.parse(text) : undefined) as T;
 }
