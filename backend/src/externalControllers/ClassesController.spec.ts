@@ -1,5 +1,13 @@
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+  ServiceUnavailableException,
+  ValidationPipe,
+} from '@nestjs/common';
 import { of, throwError } from 'rxjs';
 import { ClassesController } from './ClassesController';
+import { CancelClassDto } from './dto/cancel-class.dto';
 
 describe('ClassesController', () => {
   let controller: ClassesController;
@@ -75,7 +83,7 @@ describe('ClassesController', () => {
     );
     expect(fetch).toHaveBeenCalledWith(
       'http://users.test/users/batch?ids=teacher-1%2Cteacher-2',
-      { cache: 'no-store' },
+      { cache: 'no-store', signal: expect.any(AbortSignal) as unknown },
     );
   });
 
@@ -148,7 +156,7 @@ describe('ClassesController', () => {
       of(cmd === 'get_class' ? cls : { ...cls, status: 'Canceled' }),
     );
     registrationClient.send.mockReturnValue(
-      throwError(() => ({ statusCode: 503, message: 'down' })),
+      throwError(() => ({ statusCode: 409, message: 'busy' })),
     );
 
     await expect(controller.cancelClass(2, {})).rejects.toBeDefined();
@@ -157,6 +165,30 @@ describe('ClassesController', () => {
       { id: 2, status: 'Scheduled' },
     );
   });
+
+  it.each([
+    ['is unavailable', { statusCode: 503, message: 'down' }],
+    ['times out', new Error('Timeout has occurred')],
+  ])(
+    'keeps the class canceled when the registration service %s',
+    async (_label, failure) => {
+      const cls = { id: 2, status: 'Scheduled' };
+      classesClient.send.mockImplementation(({ cmd }: { cmd: string }) =>
+        of(cmd === 'get_class' ? cls : { ...cls, status: 'Canceled' }),
+      );
+      registrationClient.send.mockReturnValue(throwError(() => failure));
+
+      // The queued cancellation may still run, so restoring the class could
+      // leave it scheduled with every registration canceled.
+      await expect(controller.cancelClass(2, {})).rejects.toEqual(
+        new ServiceUnavailableException('Registration service unavailable'),
+      );
+      expect(classesClient.send).not.toHaveBeenCalledWith(
+        { cmd: 'update_class' },
+        { id: 2, status: 'Scheduled' },
+      );
+    },
+  );
 
   it('refunds paid registrations after canceling the class', async () => {
     const stripeService = { refundClassPayments: jest.fn() };
@@ -193,7 +225,7 @@ describe('ClassesController', () => {
   });
 
   it('reports the original error when restoring the class also fails', async () => {
-    const originalError = { statusCode: 503, message: 'registrations down' };
+    const originalError = { statusCode: 409, message: 'registrations busy' };
     classesClient.send.mockImplementation(
       ({ cmd }: { cmd: string }, payload: { status?: string }) =>
         cmd === 'get_class'
@@ -204,10 +236,128 @@ describe('ClassesController', () => {
     );
     registrationClient.send.mockReturnValue(throwError(() => originalError));
 
-    await expect(controller.cancelClass(2, {})).rejects.toBe(originalError);
+    await expect(controller.cancelClass(2, {})).rejects.toEqual(
+      new ConflictException('registrations busy'),
+    );
     expect(classesClient.send).toHaveBeenLastCalledWith(
       { cmd: 'update_class' },
       { id: 2, status: 'Scheduled' },
+    );
+  });
+
+  it('refuses to cancel a class through PATCH', async () => {
+    classesClient.send.mockReturnValue(of({ id: 2, status: 'Scheduled' }));
+
+    await expect(
+      controller.updateClass(2, { status: 'Canceled', name: 'Renamed' }),
+    ).rejects.toEqual(
+      new BadRequestException('Use POST /classes/:id/cancel to cancel a class'),
+    );
+    expect(classesClient.send).not.toHaveBeenCalledWith(
+      { cmd: 'update_class' },
+      expect.anything(),
+    );
+    expect(registrationClient.send).not.toHaveBeenCalled();
+  });
+
+  it('lets PATCH edit an already canceled class', async () => {
+    classesClient.send.mockReturnValue(of({ id: 2, status: 'Canceled' }));
+
+    await controller.updateClass(2, { status: 'Canceled', name: 'Renamed' });
+
+    expect(classesClient.send).toHaveBeenCalledWith(
+      { cmd: 'update_class' },
+      { status: 'Canceled', name: 'Renamed', id: 2 },
+    );
+  });
+
+  it.each([
+    [undefined, '2026-09-30T00:00:00Z'],
+    [['2026-09-01T00:00:00Z', '2026-09-02T00:00:00Z'], '2026-09-30T00:00:00Z'],
+  ])('rejects the range %p to %p', async (from, to) => {
+    await expect(controller.findClassesInRange(from, to)).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(classesClient.send).not.toHaveBeenCalled();
+  });
+
+  it('lists classes without teachers when the user service is unreachable', async () => {
+    classesClient.send.mockReturnValue(
+      of([{ id: 1, teacherIds: ['teacher-1'] }]),
+    );
+    registrationClient.send.mockReturnValue(of([{ classId: 1, count: 2 }]));
+    jest.spyOn(global, 'fetch').mockRejectedValue(new Error('ECONNREFUSED'));
+
+    await expect(controller.findClasses()).resolves.toEqual([
+      expect.objectContaining({ registrationCount: 2, teachers: [] }),
+    ]);
+  });
+
+  it('accepts a cancellation without a body and rejects a bad reason', async () => {
+    const pipe = new ValidationPipe({ whitelist: true, transform: true });
+    const metadata = { type: 'body' as const, metatype: CancelClassDto };
+
+    await expect(pipe.transform(undefined, metadata)).resolves.toEqual({});
+    // Unknown fields are dropped, not rejected.
+    await expect(
+      pipe.transform({ reason: 'Ill', name: 'Flow' }, metadata),
+    ).resolves.toEqual({ reason: 'Ill' });
+    await expect(pipe.transform({ reason: 7 }, metadata)).rejects.toThrow(
+      BadRequestException,
+    );
+  });
+
+  it.each([
+    [
+      400,
+      BadRequestException,
+      'from must be an ISO 8601 date-time with a timezone',
+    ],
+    [404, NotFoundException, 'Record not found'],
+    [
+      409,
+      ConflictException,
+      'A related record is missing or still references this record',
+    ],
+  ])(
+    'maps a classes-service %p reply to %p',
+    async (statusCode, type, message) => {
+      classesClient.send.mockReturnValue(
+        throwError(() => ({ statusCode, message })),
+      );
+
+      await expect(
+        controller.findClassesInRange('2026-09-01', '2026-09-30'),
+      ).rejects.toEqual(new type(message));
+    },
+  );
+
+  it('maps a rejected class update to 400 and forwards only the body and id', async () => {
+    classesClient.send.mockImplementation(({ cmd }: { cmd: string }) =>
+      cmd === 'get_class'
+        ? of({ id: 2, status: 'Scheduled', capacity: 10 })
+        : throwError(() => ({
+            statusCode: 400,
+            message: 'Unknown fields: createdAt',
+          })),
+    );
+
+    await expect(
+      controller.updateClass(2, { createdAt: 'now' }),
+    ).rejects.toEqual(new BadRequestException('Unknown fields: createdAt'));
+    expect(classesClient.send).toHaveBeenLastCalledWith(
+      { cmd: 'update_class' },
+      { createdAt: 'now', id: 2 },
+    );
+  });
+
+  it('hides an internal classes-service error behind a 503', async () => {
+    classesClient.send.mockReturnValue(
+      throwError(() => ({ status: 'error', message: 'Internal server error' })),
+    );
+
+    await expect(controller.findClasses()).rejects.toEqual(
+      new ServiceUnavailableException('Class service unavailable'),
     );
   });
 });

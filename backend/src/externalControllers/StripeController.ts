@@ -74,9 +74,12 @@ export class StripeController {
 
   @Get('status')
   @UseGuards(CheckoutRateLimitGuard)
-  status(@Req() req: Request, @Query('session_id') sessionId?: string) {
+  status(@Req() req: Request, @Query('session_id') sessionId?: unknown) {
     const userId = this.requireUserId(req);
-    if (!sessionId) throw new BadRequestException('session_id is required');
+    // A repeated query parameter arrives as an array.
+    if (typeof sessionId !== 'string' || !sessionId) {
+      throw new BadRequestException('session_id is required');
+    }
     return this.stripeService.statusForUser(sessionId, userId);
   }
 
@@ -91,12 +94,26 @@ export class StripeController {
   refund(
     @Req() req: Request,
     @Param('id') id: string,
-    @Body() body?: { percentage?: number },
+    @Body() body?: { percentage?: unknown },
   ) {
     this.assertBrowserOrigin(req);
     if (body && Object.keys(body).some((key) => key !== 'percentage')) {
       throw new BadRequestException('Invalid refund request');
     }
-    return this.stripeService.refundPayment(id, body?.percentage);
+    const percentage = body?.percentage;
+    if (
+      percentage !== undefined &&
+      !(
+        typeof percentage === 'number' &&
+        Number.isInteger(percentage) &&
+        percentage >= 1 &&
+        percentage <= 100
+      )
+    ) {
+      throw new BadRequestException(
+        'percentage must be an integer from 1 to 100',
+      );
+    }
+    return this.stripeService.refundPayment(id, percentage);
   }
 }

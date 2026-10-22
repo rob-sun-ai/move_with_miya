@@ -3,7 +3,11 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { fetchActiveUser } from './user-verification';
+import {
+  fetchActiveUser,
+  fetchUserSummaries,
+  userServiceUrl,
+} from './user-verification';
 
 describe('fetchActiveUser', () => {
   afterEach(() => jest.restoreAllMocks());
@@ -59,5 +63,54 @@ describe('fetchActiveUser', () => {
     await expect(fetchActiveUser('http://users.test', 'u')).rejects.toEqual(
       new ForbiddenException('User is banned'),
     );
+  });
+});
+
+describe('userServiceUrl', () => {
+  it.each([
+    ['configured', 'http://users:3001', 'http://users:3001'],
+    ['blank', '', 'http://localhost:3003'],
+    ['unset', undefined, 'http://localhost:3003'],
+  ])('uses the %s value', (_label, configured, expected) => {
+    expect(userServiceUrl(configured)).toBe(expected);
+  });
+});
+
+describe('fetchUserSummaries', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('looks up the ids in one escaped batch request', async () => {
+    const users = [{ id: 'u1', firstName: 'A', lastName: 'B', role: 'MEMBER' }];
+    const fetchMock = jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(new Response(JSON.stringify(users)));
+
+    await expect(
+      fetchUserSummaries('http://users.test', ['u1', 'u&2']),
+    ).resolves.toEqual(users);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://users.test/users/batch?ids=u1%2Cu%262',
+      { cache: 'no-store', signal: expect.any(AbortSignal) as unknown },
+    );
+  });
+
+  it('skips the request when there is nobody to look up', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch');
+
+    await expect(fetchUserSummaries('http://users.test', [])).resolves.toEqual(
+      [],
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['fails', () => Promise.resolve(new Response('{}', { status: 503 }))],
+    ['is unreachable', () => Promise.reject(new Error('ECONNREFUSED'))],
+  ])('returns no profiles when the user service %s', async (_label, reply) => {
+    jest.spyOn(global, 'fetch').mockImplementation(reply);
+
+    await expect(
+      fetchUserSummaries('http://users.test', ['u1']),
+    ).resolves.toEqual([]);
   });
 });

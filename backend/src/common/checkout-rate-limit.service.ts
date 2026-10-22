@@ -1,22 +1,14 @@
-import { createHmac } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { RedisService } from '../redis.service';
+import {
+  applyRateLimitHeaders,
+  consumeFixedWindow,
+  positiveIntegerSetting,
+  type RateLimitDecision,
+} from './fixed-window-rate-limit';
 
-const INCREMENT_SCRIPT = `
-local count = redis.call('INCR', KEYS[1])
-if count == 1 then
-  redis.call('PEXPIRE', KEYS[1], ARGV[1])
-end
-return { count, redis.call('PTTL', KEYS[1]) }
-`;
-
-export interface CheckoutRateLimitDecision {
-  allowed: boolean;
-  limit: number;
-  remaining: number;
-  resetSeconds: number;
-}
+export type CheckoutRateLimitDecision = RateLimitDecision;
 
 @Injectable()
 export class CheckoutRateLimitService {
@@ -75,59 +67,29 @@ export class CheckoutRateLimitService {
     decision: CheckoutRateLimitDecision,
     scope: string,
   ): void {
-    response.header(`X-RateLimit-${scope}-Limit`, String(decision.limit));
-    response.header(
-      `X-RateLimit-${scope}-Remaining`,
-      String(decision.remaining),
-    );
-    response.header(
-      `X-RateLimit-${scope}-Reset`,
-      String(decision.resetSeconds),
-    );
-    if (!decision.allowed) {
-      response.header('Retry-After', String(decision.resetSeconds));
-    }
+    applyRateLimitHeaders(response, decision, scope);
   }
 
-  private async consume(
+  private consume(
     scope: string,
     identifier: string,
     limit: number,
     ttlMs: number,
   ): Promise<CheckoutRateLimitDecision> {
-    const window = Math.floor(Date.now() / ttlMs);
-    const key = `${this.configService.get<string>(
+    const prefix = this.configService.get<string>(
       'CHECKOUT_RATE_LIMIT_PREFIX',
       'checkout-rate-limit',
-    )}:${scope}:${this.hash(`${identifier}:${window}`)}`;
-    const result = await this.redisService
-      .getClient()
-      .sendCommand(['EVAL', INCREMENT_SCRIPT, '1', key, String(ttlMs)]);
-    const [countValue] = result as unknown as [
-      string | number,
-      string | number,
-    ];
-    const count = Number(countValue);
-    const resetSeconds = Math.max(
-      1,
-      Math.ceil((ttlMs - (Date.now() % ttlMs)) / 1000),
     );
-    return {
-      allowed: count <= limit,
+    return consumeFixedWindow(this.redisService.getClient(), {
+      keyPrefix: `${prefix}:${scope}`,
+      identifier,
+      secret: this.configService.get<string>('SESSION_SECRET'),
       limit,
-      remaining: Math.max(0, limit - count),
-      resetSeconds,
-    };
-  }
-
-  private hash(value: string): string {
-    const secret = this.configService.get<string>('SESSION_SECRET');
-    if (!secret) throw new Error('Rate-limit secret is not configured');
-    return createHmac('sha256', secret).update(value).digest('hex');
+      ttlMs,
+    });
   }
 
   private getPositiveInteger(key: string, fallback: number): number {
-    const value = Number(this.configService.get<string>(key));
-    return Number.isInteger(value) && value > 0 ? value : fallback;
+    return positiveIntegerSetting(this.configService, key, fallback);
   }
 }

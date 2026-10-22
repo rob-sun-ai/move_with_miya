@@ -139,10 +139,13 @@ describe('StripeService lifecycle', () => {
       expect(Stripe).toHaveBeenLastCalledWith('sk_live_key');
     });
 
-    it('falls back to a placeholder key outside production', () => {
-      setup({ STRIPE_SECRET_KEY: undefined });
-      expect(Stripe).toHaveBeenLastCalledWith('sk_test_unconfigured');
-    });
+    it.each([undefined, ''])(
+      'falls back to a placeholder key for an unset key (%p)',
+      (key) => {
+        setup({ STRIPE_SECRET_KEY: key });
+        expect(Stripe).toHaveBeenLastCalledWith('sk_test_unconfigured');
+      },
+    );
 
     it('sweeps refunds every minute until the module is destroyed', () => {
       const { service } = setup();
@@ -209,7 +212,6 @@ describe('StripeService lifecycle', () => {
       [404, NotFoundException],
       [409, ConflictException],
       [403, ForbiddenException],
-      [500, ServiceUnavailableException],
     ])('maps status %p to %p', async (statusCode, type) => {
       const { service, replies } = setup();
       replies.get_payment_status_for_user = new RpcFailure({
@@ -222,14 +224,21 @@ describe('StripeService lifecycle', () => {
       );
     });
 
-    it('reports an unavailable payment service for unknown errors', async () => {
-      const { service, replies } = setup();
-      replies.get_payment_status_for_user = new RpcFailure(null);
+    it.each([
+      ['no payload', null],
+      ['a server error', { statusCode: 500, message: 'P2002 on payment' }],
+      ['a remote crash', { status: 'error', message: 'Internal server error' }],
+    ])(
+      'reports an unavailable payment service for %s without its details',
+      async (_label, error) => {
+        const { service, replies } = setup();
+        replies.get_payment_status_for_user = new RpcFailure(error);
 
-      await expect(service.statusForUser('cs_1', 'user-1')).rejects.toEqual(
-        new ServiceUnavailableException('Payment service unavailable'),
-      );
-    });
+        await expect(service.statusForUser('cs_1', 'user-1')).rejects.toEqual(
+          new ServiceUnavailableException('Payment service unavailable'),
+        );
+      },
+    );
   });
 
   describe('createCheckoutSession', () => {

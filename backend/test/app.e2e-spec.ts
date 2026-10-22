@@ -10,10 +10,15 @@ import { ContactEmailService } from './../src/externalControllers/contact-email.
 import { ContactRateLimitService } from './../src/externalControllers/contact-rate-limit.service';
 import { TurnstileService } from './../src/externalControllers/turnstile.service';
 import { of } from 'rxjs';
+import { ExpressAdapter } from '@nestjs/platform-express';
+import { createExpressServer } from './../src/express-server';
+import { CheckoutRateLimitService } from './../src/common/checkout-rate-limit.service';
 
 describe('AppController (e2e)', () => {
   let app: INestApplication<App>;
   let registrationClient: { send: jest.Mock };
+  let classesClient: { send: jest.Mock };
+  let checkoutRateLimit: Record<string, jest.Mock>;
 
   beforeEach(async () => {
     registrationClient = {
@@ -28,13 +33,27 @@ describe('AppController (e2e)', () => {
         return of([]);
       }),
     };
+    classesClient = { send: jest.fn().mockReturnValue(of([])) };
+    const allowed = {
+      allowed: true,
+      limit: 30,
+      remaining: 29,
+      resetSeconds: 60,
+    };
+    checkoutRateLimit = {
+      consumeIp: jest.fn().mockResolvedValue(allowed),
+      consumeUser: jest.fn().mockResolvedValue(allowed),
+      consumeRefundIp: jest.fn().mockResolvedValue(allowed),
+      consumeStatusIp: jest.fn().mockResolvedValue(allowed),
+      applyHeaders: jest.fn(),
+    };
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     })
       .overrideProvider('REGISTRATION_SERVICE')
       .useValue(registrationClient)
       .overrideProvider('CLASSES_SERVICE')
-      .useValue({ send: jest.fn().mockReturnValue(of([])) })
+      .useValue(classesClient)
       .overrideProvider(ContactEmailService)
       .useValue({ notify: jest.fn().mockResolvedValue(undefined) })
       .overrideProvider(ContactChallengeService)
@@ -52,13 +71,17 @@ describe('AppController (e2e)', () => {
       })
       .overrideProvider(TurnstileService)
       .useValue({ verify: jest.fn().mockResolvedValue(true) })
+      .overrideProvider(CheckoutRateLimitService)
+      .useValue(checkoutRateLimit)
       .overrideGuard(ContactRateLimitGuard)
       .useValue({ canActivate: () => true })
       .overrideGuard(AdminGuard)
       .useValue({ canActivate: () => true })
       .compile();
 
-    app = moduleFixture.createNestApplication();
+    app = moduleFixture.createNestApplication(
+      new ExpressAdapter(createExpressServer()),
+    );
     app.useGlobalPipes(
       new ValidationPipe({ whitelist: true, transform: true }),
     );
@@ -113,6 +136,56 @@ describe('AppController (e2e)', () => {
       .get('/registration')
       .expect(200)
       .expect([]);
+  });
+
+  it('matches routes case-sensitively so proxy path rules cannot be dodged', async () => {
+    await request(app.getHttpServer()).get('/registration').expect(200);
+    await request(app.getHttpServer()).get('/REGISTRATION').expect(404);
+    await request(app.getHttpServer()).get('/Registration').expect(404);
+  });
+
+  it('does not advertise the framework', async () => {
+    const response = await request(app.getHttpServer()).get('/').expect(200);
+    expect(response.headers['x-powered-by']).toBeUndefined();
+  });
+
+  it('rate-limits checkout requests by the route they matched', async () => {
+    await request(app.getHttpServer()).get('/checkout/status/?session_id=cs_1');
+    await request(app.getHttpServer()).post('/checkout/payments/p1/refund');
+
+    expect(checkoutRateLimit.consumeStatusIp).toHaveBeenCalledWith(
+      '/checkout/status',
+      expect.any(String),
+    );
+    expect(checkoutRateLimit.consumeRefundIp).toHaveBeenCalledWith(
+      '/checkout/payments/refund',
+      expect.any(String),
+    );
+  });
+
+  it('cancels a registration when the admin sends no body', async () => {
+    registrationClient.send.mockImplementation((pattern: { cmd: string }) =>
+      of(
+        pattern.cmd === 'get_registration'
+          ? { id: 4, classId: 2 }
+          : { id: 4, status: 'Canceled' },
+      ),
+    );
+    classesClient.send.mockReturnValue(
+      of({ id: 2, capacity: 10, startDate: '2099-01-01T10:00:00.000Z' }),
+    );
+
+    await request(app.getHttpServer())
+      .post('/registration/4/cancel')
+      .expect(201)
+      .expect({ id: 4, status: 'Canceled' });
+  });
+
+  it('rejects an out-of-range admin refund percentage', () => {
+    return request(app.getHttpServer())
+      .post('/registration/4/cancel')
+      .send({ refundPercentage: 150 })
+      .expect(400);
   });
 
   afterEach(async () => {

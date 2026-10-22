@@ -20,13 +20,16 @@ export class CheckoutRateLimitGuard implements CanActivate {
     const http = context.switchToHttp();
     const request = http.getRequest<Request>();
     const response = http.getResponse<Response>();
-    const path = request.path || 'checkout';
-    const isRefund = path.endsWith('/refund');
+    // Bucket by the matched route template, not the raw path, so variants
+    // such as a trailing slash cannot open a fresh bucket.
+    const routePath = (request as { route?: { path?: unknown } }).route?.path;
+    const template = typeof routePath === 'string' ? routePath : 'checkout';
+    const isRefund = template.endsWith('/refund');
     // The success page polls this read-only, member-scoped lookup while it
     // waits for the webhook, so it gets its own generous per-IP bucket.
-    const isStatus = path.endsWith('/status');
-    // Refund paths contain the payment id; limit per admin, not per payment.
-    const route = isRefund ? '/checkout/payments/refund' : path;
+    const isStatus = template.endsWith('/status');
+    // One refund bucket per admin, whichever payment is being refunded.
+    const route = isRefund ? '/checkout/payments/refund' : template;
     const ip = request.ip || request.socket.remoteAddress || 'unknown';
     const userId = request.session?.userId;
 

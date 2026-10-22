@@ -20,13 +20,18 @@ import {
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { ClientProxy } from '@nestjs/microservices';
-import { lastValueFrom } from 'rxjs';
 import { AdminGuard } from '../common/guards/admin.guard';
 import { StaffGuard } from '../common/guards/staff.guard';
 import { sendRpc } from '../common/rpc';
-import { UpdateRegistrationDto } from './dto/update-registration.dto';
+import {
+  fetchActiveUser,
+  fetchUserSummaries,
+  type UserSummary,
+  userServiceUrl,
+} from '../common/user-verification';
 import { StripeService } from './stripe.service';
-import { fetchActiveUser } from '../common/user-verification';
+import { CancelRegistrationDto } from './dto/cancel-registration.dto';
+import { UpdateRegistrationDto } from './dto/update-registration.dto';
 
 interface Registration {
   id: number;
@@ -34,7 +39,7 @@ interface Registration {
   classId: number;
   status: string;
   registeredAt: string;
-  user?: Record<string, unknown> | null;
+  user?: UserSummary | null;
   class?: {
     id: number;
     name: string;
@@ -118,35 +123,27 @@ export class RegistrationController {
     );
   }
 
-  private rpcClasses<T = unknown>(cmd: string, payload: object) {
-    return sendRpc<T>(
+  private getClass(classId: number) {
+    return sendRpc<{
+      id: number;
+      capacity?: number;
+      startDate?: string;
+      endDate?: string;
+      status?: string;
+      isPrivate?: boolean;
+      cost?: string | number;
+      waitlistEnabled?: boolean;
+      cancellationCutoffHours?: number;
+      refundPolicy?: Array<{
+        hoursBeforeStart: number;
+        percentage: number;
+      }>;
+    } | null>(
       this.classesClient,
-      cmd,
-      payload,
+      'get_class',
+      { id: classId },
       'Class service unavailable',
     );
-  }
-
-  private async getClass(classId: number) {
-    try {
-      return await lastValueFrom<{
-        id: number;
-        capacity?: number;
-        startDate?: string;
-        endDate?: string;
-        status?: string;
-        isPrivate?: boolean;
-        cost?: string | number;
-        waitlistEnabled?: boolean;
-        cancellationCutoffHours?: number;
-        refundPolicy?: Array<{
-          hoursBeforeStart: number;
-          percentage: number;
-        }>;
-      } | null>(this.classesClient.send({ cmd: 'get_class' }, { id: classId }));
-    } catch {
-      throw new ServiceUnavailableException('Class service unavailable');
-    }
   }
 
   /**
@@ -160,26 +157,15 @@ export class RegistrationController {
     const userIds = withUsers
       ? [...new Set(registrations.map((r) => r.userId).filter(Boolean))]
       : [];
-    const userServiceUrl =
-      process.env.USER_SERVICE_URL || 'http://localhost:3003';
 
     const [users, classes] = await Promise.all([
-      userIds.length === 0
-        ? Promise.resolve([] as Record<string, unknown>[])
-        : fetch(
-            `${userServiceUrl}/users/batch?ids=${encodeURIComponent(
-              userIds.join(','),
-            )}`,
-            { cache: 'no-store' },
-          ).then(async (res) =>
-            res.ok ? ((await res.json()) as Record<string, unknown>[]) : [],
-          ),
-      this.rpcClasses<ClassSummary[]>('get_classes', {}).catch(
+      fetchUserSummaries(userServiceUrl(), userIds),
+      sendRpc<ClassSummary[]>(this.classesClient, 'get_classes', {}).catch(
         (): ClassSummary[] => [],
       ),
     ]);
 
-    const userMap = new Map(users.map((u) => [String(u.id), u]));
+    const userMap = new Map(users.map((u) => [u.id, u]));
     const classMap = new Map(classes.map((cls) => [cls.id, cls]));
     return registrations.map((registration) => ({
       ...registration,
@@ -286,10 +272,7 @@ export class RegistrationController {
       throw new ServiceUnavailableException('Class capacity is invalid');
     }
 
-    const user = await fetchActiveUser(
-      process.env.USER_SERVICE_URL || 'http://localhost:3003',
-      userId,
-    );
+    const user = await fetchActiveUser(userServiceUrl(), userId);
     if (cls.isPrivate && !user.yogaExperience?.trim()) {
       throw new ForbiddenException(
         'Yoga experience is required for this class',
@@ -357,7 +340,7 @@ export class RegistrationController {
   @Post(':id/cancel')
   async cancelRegistration(
     @Param('id', ParseIntPipe) id: number,
-    @Body() body: { reason?: string; refundPercentage?: number },
+    @Body() body: CancelRegistrationDto,
   ) {
     const registration = await this.rpc<Registration>('get_registration', {
       id,

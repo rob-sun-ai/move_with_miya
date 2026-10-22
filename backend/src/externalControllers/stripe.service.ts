@@ -12,9 +12,9 @@ import {
 import { Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ClientProxy } from '@nestjs/microservices';
-import { firstValueFrom } from 'rxjs';
 import Stripe from 'stripe';
-import { fetchActiveUser } from '../common/user-verification';
+import { sendRpc } from '../common/rpc';
+import { fetchActiveUser, userServiceUrl } from '../common/user-verification';
 
 // Stripe rejects Checkout sessions that expire less than 30 minutes after
 // creation; keep a margin for the RPC round-trips before the create call.
@@ -90,8 +90,10 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
     @Inject('REGISTRATION_SERVICE') private readonly registrations: ClientProxy,
     @Inject('CLASSES_SERVICE') private readonly classes: ClientProxy,
   ) {
+    // `||` rather than a get() default: a blank STRIPE_SECRET_KEY= line in a
+    // dev .env would otherwise make the Stripe constructor throw at boot.
     this.stripe = new Stripe(
-      this.config.get<string>('STRIPE_SECRET_KEY', 'sk_test_unconfigured'),
+      this.config.get<string>('STRIPE_SECRET_KEY') || 'sk_test_unconfigured',
     );
   }
 
@@ -129,37 +131,27 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
     if (this.retryTimer) clearInterval(this.retryTimer);
   }
 
-  private async rpc<T>(cmd: string, payload: object): Promise<T> {
-    try {
-      return await firstValueFrom(this.registrations.send<T>({ cmd }, payload));
-    } catch (error) {
-      const data = (error ?? {}) as { statusCode?: number; message?: string };
-      const message = data.message ?? 'Payment service unavailable';
-      if (data.statusCode === 400) throw new BadRequestException(message);
-      if (data.statusCode === 404) throw new NotFoundException(message);
-      if (data.statusCode === 409) throw new ConflictException(message);
-      if (data.statusCode === 403) throw new ForbiddenException(message);
-      throw new ServiceUnavailableException(message);
-    }
+  private rpc<T>(cmd: string, payload: object): Promise<T> {
+    return sendRpc<T>(
+      this.registrations,
+      cmd,
+      payload,
+      'Payment service unavailable',
+    );
   }
 
-  private rpcClasses<T>(cmd: string, payload: object): Promise<T> {
-    return firstValueFrom(this.classes.send<T>({ cmd }, payload));
-  }
-
-  private async getClass(classId: number) {
-    try {
-      return await this.rpcClasses<ClassRecord | null>('get_class', {
-        id: classId,
-      });
-    } catch {
-      throw new ServiceUnavailableException('Class service unavailable');
-    }
+  private getClass(classId: number) {
+    return sendRpc<ClassRecord | null>(
+      this.classes,
+      'get_class',
+      { id: classId },
+      'Class service unavailable',
+    );
   }
 
   private assertUser(userId: string) {
     return fetchActiveUser(
-      this.config.get<string>('USER_SERVICE_URL') || 'http://localhost:3003',
+      userServiceUrl(this.config.get<string>('USER_SERVICE_URL')),
       userId,
     );
   }

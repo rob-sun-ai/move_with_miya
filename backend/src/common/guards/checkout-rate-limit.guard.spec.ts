@@ -11,11 +11,13 @@ describe('CheckoutRateLimitGuard', () => {
   };
 
   function context(
-    path = '/checkout/create-session',
+    route = '/checkout/create-session',
     userId: string | null = 'user-1',
+    path = route,
   ) {
     const request = {
       path,
+      route: { path: route },
       ip: '198.51.100.1',
       socket: { remoteAddress: undefined },
       session: userId === null ? {} : { userId },
@@ -117,6 +119,8 @@ describe('CheckoutRateLimitGuard', () => {
     const service = serviceWith();
     const guard = guardFor(service);
     const { context: executionContext, response } = context(
+      '/checkout/payments/:id/refund',
+      'user-1',
       '/checkout/payments/p1/refund',
     );
 
@@ -142,8 +146,10 @@ describe('CheckoutRateLimitGuard', () => {
     const service = serviceWith();
     const guard = guardFor(service);
 
-    await guard.canActivate(context('/checkout/payments/p1/refund').context);
-    await guard.canActivate(context('/checkout/payments/p2/refund').context);
+    const refund = (path: string) =>
+      context('/checkout/payments/:id/refund', 'user-1', path).context;
+    await guard.canActivate(refund('/checkout/payments/p1/refund'));
+    await guard.canActivate(refund('/checkout/payments/p2/refund'));
 
     const [first, second] = service.consumeUser.mock.calls as unknown[][];
     expect(second).toEqual(first);
@@ -164,6 +170,27 @@ describe('CheckoutRateLimitGuard', () => {
     expect(service.applyHeaders).toHaveBeenCalledTimes(1);
     expect(service.applyHeaders).toHaveBeenCalledWith(response, decision, 'IP');
   });
+
+  it.each(['/CHECKOUT/Create-Session', '/checkout/create-session/'])(
+    'counts the path variant %p against the route it matched',
+    async (path) => {
+      const service = serviceWith();
+      const guard = guardFor(service);
+
+      await guard.canActivate(
+        context('/checkout/create-session', 'user-1', path).context,
+      );
+
+      expect(service.consumeIp).toHaveBeenCalledWith(
+        '/checkout/create-session',
+        '198.51.100.1',
+      );
+      expect(service.consumeUser).toHaveBeenCalledWith(
+        '/checkout/create-session',
+        'user-1',
+      );
+    },
+  );
 
   it('blocks when the member bucket is exhausted', async () => {
     const guard = guardFor(

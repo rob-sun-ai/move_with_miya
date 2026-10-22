@@ -162,11 +162,15 @@ describe('StripeController', () => {
       );
     });
 
-    it('requires a session id', () => {
-      expect(() => controller.status(request({ userId: 'user-1' }))).toThrow(
-        new BadRequestException('session_id is required'),
-      );
-    });
+    it.each([undefined, '', ['cs_1', 'cs_2']])(
+      'requires a single session id (%p)',
+      (sessionId) => {
+        expect(() =>
+          controller.status(request({ userId: 'user-1' }), sessionId),
+        ).toThrow(new BadRequestException('session_id is required'));
+        expect(stripeService.statusForUser).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it('lists payments for admins', async () => {
@@ -189,6 +193,20 @@ describe('StripeController', () => {
         percentage,
       );
     });
+
+    it.each([0, 101, 12.5, '50', null])(
+      'rejects refund percentage %p',
+      (percentage) => {
+        expect(() =>
+          controller.refund(request(), 'payment-1', { percentage }),
+        ).toThrow(
+          new BadRequestException(
+            'percentage must be an integer from 1 to 100',
+          ),
+        );
+        expect(stripeService.refundPayment).not.toHaveBeenCalled();
+      },
+    );
 
     it('rejects unexpected fields', () => {
       expect(() =>
