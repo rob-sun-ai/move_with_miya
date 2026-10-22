@@ -30,6 +30,16 @@ describe('ClassesController', () => {
     expect(service.findClass).toHaveBeenCalledWith(2);
   });
 
+  it.each([
+    ['findClass', null],
+    ['updateClass', 'id=2'],
+    ['createClass', [1]],
+  ] as const)('rejects a %s payload of %p', (handler, payload) => {
+    expect(() => controller[handler](payload as never)).toThrow(
+      'Payload must be an object',
+    );
+  });
+
   it('forwards creates, updates, and deletes', async () => {
     const data = {
       id: 2,

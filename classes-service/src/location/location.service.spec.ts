@@ -1,5 +1,5 @@
 import { Test } from '@nestjs/testing';
-import { NotFoundException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 
 jest.mock('../prisma/prisma.service', () => ({ PrismaService: class {} }));
 
@@ -78,5 +78,54 @@ describe('LocationService', () => {
       data: { city: 'Cambridge' },
     });
     expect(location.delete).toHaveBeenCalledWith({ where: { id: 1 } });
+  });
+
+  it('stores a blank name as no name', async () => {
+    await service.createLocation({
+      name: '',
+      address: '1 Main St',
+      city: 'Boston',
+      state: 'MA',
+      zipCode: '02110',
+    });
+    expect(location.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ name: null }) as unknown,
+    });
+  });
+
+  it.each([
+    [{ address: '1 Main St', city: 'Boston', state: 'MA' }, 'are required'],
+    [
+      { address: '', city: 'Boston', state: 'MA', zipCode: '02110' },
+      'address must be a non-empty string',
+    ],
+    [
+      { address: 1, city: 'Boston', state: 'MA', zipCode: '02110' },
+      'address must be a non-empty string',
+    ],
+  ])('rejects the new location %j', (data, message) => {
+    expect(() => service.createLocation(data)).toThrow(message);
+    expect(location.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects nested writes and other unknown fields on update', () => {
+    expect(() =>
+      service.updateLocation(1, { classes: { deleteMany: {} } }),
+    ).toThrow('Unknown fields: classes');
+    expect(() => service.updateLocation(1, { city: null })).toThrow(
+      'city must be a non-empty string',
+    );
+    expect(location.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects an invalid location id', async () => {
+    await expect(service.findLocation('two')).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(() => service.deleteLocation(undefined)).toThrow(
+      BadRequestException,
+    );
+    expect(location.findUnique).not.toHaveBeenCalled();
+    expect(location.delete).not.toHaveBeenCalled();
   });
 });
