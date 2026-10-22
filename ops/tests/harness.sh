@@ -56,6 +56,7 @@ RESEND_FROM_EMAIL=Move with Miya <hello@studio.test>
 STRIPE_SECRET_KEY=sk_live_key
 STRIPE_WEBHOOK_SECRET=whsec_key
 STRIPE_CURRENCY=usd
+TLS_CERT_DIR=$SANDBOX
 TLS_CERT_FILE=$SANDBOX/fullchain.pem
 TLS_KEY_FILE=$SANDBOX/privkey.pem
 GRAFANA_ADMIN_PASSWORD=a-long-grafana-admin-password

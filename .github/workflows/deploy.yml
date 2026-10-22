@@ -19,8 +19,8 @@ on:
         required: true
         type: environment
 
-permissions:
-  contents: read
+# The job only talks to the host over SSH; it needs no repository access.
+permissions: {}
 
 # One deploy or rollback per environment at a time; later runs queue.
 concurrency:
@@ -32,10 +32,6 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
       # Validated here, before anything reaches the host: ssh joins its
       # arguments into one string that the remote shell parses.
       - name: Validate inputs
@@ -57,9 +53,12 @@ jobs:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: |
+          [ -n "$DEPLOY_SSH_KEY" ] && [ -n "$DEPLOY_KNOWN_HOSTS" ] || {
+            echo 'DEPLOY_SSH_KEY and DEPLOY_KNOWN_HOSTS secrets are required' >&2
+            exit 1
+          }
           install -m 700 -d ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
+          (umask 077 && printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key)
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
 
       - name: Deploy or rollback on host
@@ -73,7 +72,9 @@ jobs:
         run: |
           # Quote each argument for the remote shell.
           remote_args=$(printf '%q ' "$OPERATION" "$RELEASE_VERSION" "$DEPLOY_PATH" "$DEPLOY_ENV_FILE")
-          ssh -o BatchMode=yes -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" \
+          # Only the pinned host key is accepted; never trust on first use.
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+            -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" \
             "sh -s -- $remote_args" <<'REMOTE'
           set -eu
           operation=$1
@@ -94,8 +95,16 @@ jobs:
 
           cd "$deploy_path"
           if [ "$operation" = deploy ]; then
+            # Never switch the checkout under a running deploy or rollback.
+            # Released before deploy.sh, which takes the same lock itself.
+            exec 9> "$(git rev-parse --git-path move-with-miya-deploy.lock)"
+            flock -n 9 || {
+              echo 'Another deploy or rollback is running on this host' >&2
+              exit 1
+            }
             git fetch --tags origin "$release_version"
             git checkout --detach "$release_version"
+            exec 9>&-
             ENV_FILE="$deploy_env_file" RELEASE_VERSION="$release_version" ./ops/deploy.sh
           elif [ "$operation" = rollback ]; then
             ENV_FILE="$deploy_env_file" ROLLBACK_VERSION="$release_version" ./ops/rollback.sh
@@ -104,3 +113,7 @@ jobs:
             exit 1
           fi
           REMOTE
+
+      - name: Remove the SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

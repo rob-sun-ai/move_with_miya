@@ -131,15 +131,21 @@ test_persist_release_version_adds_a_missing_release() {
 RELEASE_VERSION=abc'
 }
 
-test_reload_nginx_starts_then_reloads_it() {
-  (. ./ops/lib.sh && reload_nginx)
-  prefix="compose --env-file $ENV_FILE -f docker-compose.prod.yml"
-  assert_eq "$(cat "$SHIM_DIR/docker.log")" "$prefix up -d --no-deps nginx
-$prefix exec -T nginx nginx -s reload"
+test_restart_nginx_recreates_only_nginx() {
+  (. ./ops/lib.sh && restart_nginx)
+  assert_eq "$(cat "$SHIM_DIR/docker.log")" \
+    "compose --env-file $ENV_FILE -f docker-compose.prod.yml up -d --no-deps --force-recreate nginx"
 }
 
-test_reload_nginx_does_not_start_its_dependencies_or_migrations() {
-  (. ./ops/lib.sh && reload_nginx)
+test_persist_release_version_appends_after_a_last_line_without_newline() {
+  printf 'A=1' > "$ENV_FILE"
+  (. ./ops/lib.sh && persist_release_version abc)
+  assert_eq "$(cat "$ENV_FILE")" 'A=1
+RELEASE_VERSION=abc'
+}
+
+test_restart_nginx_does_not_start_its_dependencies_or_migrations() {
+  (. ./ops/lib.sh && restart_nginx)
   assert_eq "$(cat "$SHIM_DIR/started.log")" nginx
 }
 

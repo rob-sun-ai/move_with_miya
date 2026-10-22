@@ -20,8 +20,7 @@ test_restarts_services_on_the_previous_images_without_old_migrations() {
   export SHIM_IMAGES; SHIM_IMAGES=$(images_for "$TARGET")
   output=$(rollback "$TARGET" 2>&1) || fail "rollback failed: $output"
   assert_contains "$(calls)" "up -d --wait --no-build --no-deps $SERVICES"
-  assert_contains "$(calls)" 'up -d --no-deps nginx'
-  assert_contains "$(calls)" 'exec -T nginx nginx -s reload'
+  assert_contains "$(calls)" 'up -d --no-deps --force-recreate nginx'
   [ -z "$(calls | grep migrate)" ] || fail 'rollback ran migration jobs'
   # Nor may Compose start them as dependencies of what rollback starts.
   [ -z "$(grep migrate "$SHIM_DIR/started.log")" ] \

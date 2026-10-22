@@ -30,7 +30,7 @@ test_deploys_the_checked_out_commit_in_order() {
     'exec -T postgres' 'run --rm user-migrate' 'run --rm classes-migrate' \
     'run --rm registration-migrate' \
     'up -d --wait --no-deps user-service backend classes-service registration-service frontend' \
-    'up -d --no-deps nginx' 'exec -T nginx nginx -s reload' \
+    'up -d --no-deps --force-recreate nginx' \
     'up -d --no-deps otel-collector prometheus alertmanager loki promtail tempo grafana'; do
     [ -n "$(line_of "$step")" ] || fail "missing step: $step"
   done
@@ -38,8 +38,8 @@ test_deploys_the_checked_out_commit_in_order() {
     || fail 'backup must run before migrations'
   [ "$(line_of 'run --rm registration-migrate')" -lt "$(line_of 'up -d --wait --no-deps user-service')" ] \
     || fail 'migrations must finish before services start'
-  [ "$(line_of 'up -d --wait --no-deps user-service')" -lt "$(line_of 'nginx -s reload')" ] \
-    || fail 'nginx must reload after services are recreated'
+  [ "$(line_of 'up -d --wait --no-deps user-service')" -lt "$(line_of 'force-recreate nginx')" ] \
+    || fail 'nginx must be recreated after services are recreated'
   assert_contains "$output" "Deployment completed for $HEAD_SHA."
 }
 
@@ -82,8 +82,31 @@ test_prints_the_rollback_command_when_smoke_checks_fail() {
   sed -i "s/^RELEASE_VERSION=.*/RELEASE_VERSION=$previous/" "$ENV_FILE"
   export SHIM_FAIL_CURL=/classes
   output=$(deploy 2>&1) && fail 'expected failure'
-  assert_contains "$output" "$HEAD_SHA is serving but was not recorded"
+  assert_contains "$output" "Smoke checks failed. $HEAD_SHA was not recorded"
   assert_contains "$output" "ROLLBACK_VERSION=$previous ENV_FILE=$ENV_FILE ./ops/rollback.sh"
+}
+
+test_prints_the_rollback_command_when_services_stay_unhealthy() {
+  write_production_env
+  previous=abcdefabcdefabcdefabcdefabcdefabcdefabcd
+  sed -i "s/^RELEASE_VERSION=.*/RELEASE_VERSION=$previous/" "$ENV_FILE"
+  export SHIM_FAIL_UP=backend
+  output=$(deploy 2>&1) && fail 'expected failure'
+  assert_contains "$output" "Application services did not become healthy. $HEAD_SHA was not recorded"
+  assert_contains "$output" "ROLLBACK_VERSION=$previous ENV_FILE=$ENV_FILE ./ops/rollback.sh"
+  [ -z "$(line_of 'nginx')" ] || fail 'nginx was recreated in front of unhealthy services'
+  assert_contains "$(cat "$ENV_FILE")" "RELEASE_VERSION=$previous"
+}
+
+test_prints_the_rollback_command_when_nginx_cannot_be_recreated() {
+  write_production_env
+  previous=abcdefabcdefabcdefabcdefabcdefabcdefabcd
+  sed -i "s/^RELEASE_VERSION=.*/RELEASE_VERSION=$previous/" "$ENV_FILE"
+  export SHIM_FAIL_UP=nginx
+  output=$(deploy 2>&1) && fail 'expected failure'
+  assert_contains "$output" "nginx could not be recreated. $HEAD_SHA was not recorded"
+  assert_contains "$output" "ROLLBACK_VERSION=$previous ENV_FILE=$ENV_FILE ./ops/rollback.sh"
+  assert_contains "$(cat "$ENV_FILE")" "RELEASE_VERSION=$previous"
 }
 
 test_says_when_there_is_no_release_to_roll_back_to() {

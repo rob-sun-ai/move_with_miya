@@ -19,11 +19,11 @@ for service in $services; do
 done
 
 # --no-deps: do not run the older release's migration jobs against the
-# already-migrated databases. --wait: only reload nginx once they are healthy.
+# already-migrated databases. --wait: only recreate nginx once they are healthy.
 # This keeps the current checkout's compose file and nginx config.
 # shellcheck disable=SC2086
 compose up -d --wait --no-build --no-deps $services
-reload_nginx
+restart_nginx
 ./ops/smoke-test.sh "${PUBLIC_APP_URL:?PUBLIC_APP_URL is required}"
 persist_release_version "$RELEASE_VERSION"
 echo "Rolled back to $RELEASE_VERSION."

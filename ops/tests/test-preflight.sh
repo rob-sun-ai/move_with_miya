@@ -96,4 +96,12 @@ test_requires_readable_tls_files() {
   expect_failure 'TLS key is not readable' "TLS_KEY_FILE=$SANDBOX/missing.pem"
 }
 
+test_requires_tls_files_inside_the_mounted_directory() {
+  expect_failure 'TLS_CERT_FILE and TLS_KEY_FILE must be inside TLS_CERT_DIR' \
+    "TLS_CERT_DIR=$SANDBOX/certs"
+  setup_sandbox
+  # Unset, nginx mounts /etc/letsencrypt.
+  expect_failure 'must be inside TLS_CERT_DIR (/etc/letsencrypt)' TLS_CERT_DIR=
+}
+
 run_tests

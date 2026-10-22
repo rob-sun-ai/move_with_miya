@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
 set -eu
+. ./ops/lib.sh
 
 required='NODE_ENV PUBLIC_HOST POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB RABBITMQ_USER RABBITMQ_PASS SESSION_SECRET CORS_ORIGIN PUBLIC_APP_URL GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_CALLBACK_URL NEXT_PUBLIC_AUTH_URL NEXT_PUBLIC_TURNSTILE_SITE_KEY CONTACT_CHALLENGE_SECRET TURNSTILE_SECRET_KEY TURNSTILE_HOSTNAME RESEND_API_KEY CONTACT_EMAIL_TO RESEND_FROM_EMAIL STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET STRIPE_CURRENCY TLS_CERT_FILE TLS_KEY_FILE GRAFANA_ADMIN_PASSWORD ALERT_EMAIL_TO AGE_RECIPIENT BACKUP_REMOTE'
 for key in $required; do
@@ -34,10 +35,16 @@ case "$ALERT_EMAIL_TO" in
   *) echo 'ALERT_EMAIL_TO must be a single email address' >&2; exit 1 ;;
 esac
 case "$AGE_RECIPIENT" in age1*) ;; *) echo 'AGE_RECIPIENT must be an age public key (age1...)' >&2; exit 1 ;; esac
-for command_name in docker age rclone sha256sum; do
-  command -v "$command_name" >/dev/null 2>&1 || { echo "Missing required command: $command_name" >&2; exit 1; }
-done
+require_command docker age rclone sha256sum
 [ -r "$TLS_CERT_FILE" ] || { echo 'TLS certificate is not readable' >&2; exit 1; }
 [ -r "$TLS_KEY_FILE" ] || { echo 'TLS key is not readable' >&2; exit 1; }
+# nginx only mounts TLS_CERT_DIR (see docker-compose.prod.yml).
+tls_dir=${TLS_CERT_DIR:-/etc/letsencrypt}
+for tls_file in "$TLS_CERT_FILE" "$TLS_KEY_FILE"; do
+  case "$tls_file" in
+    "${tls_dir%/}"/*) ;;
+    *) echo "TLS_CERT_FILE and TLS_KEY_FILE must be inside TLS_CERT_DIR ($tls_dir)" >&2; exit 1 ;;
+  esac
+done
 
 echo 'Production configuration preflight passed.'

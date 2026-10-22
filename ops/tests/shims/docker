@@ -10,6 +10,7 @@
 #   alertmanager        -> appends the call to $SHIM_DIR/alerts.log (fails if SHIM_FAIL_ALERT=1)
 #   image inspect REF   -> succeeds only if REF is listed in $SHIM_IMAGES
 #   compose run JOB     -> fails if SHIM_FAIL_RUN=JOB
+#   compose up SVC...   -> fails if SHIM_FAIL_UP=<one of the listed services>
 #   compose up SVC...   -> appends each service Compose would start to
 #                          $SHIM_DIR/started.log: the listed services plus,
 #                          without --no-deps, their transitive depends_on in
@@ -43,6 +44,7 @@ compose_dependencies() {
 args=("$@")
 for index in "${!args[@]}"; do
   [ "${args[$index]}" = up ] || continue
+  case " ${args[*]:$((index + 1))} " in *" ${SHIM_FAIL_UP:-none} "*) exit 1 ;; esac
   no_deps=
   pending=()
   for arg in "${args[@]:$((index + 1))}"; do
