@@ -19,7 +19,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro,z
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER}']
       interval: 5s
@@ -48,7 +48,6 @@ services:
       PORT: 3001
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/miya_users
       REDIS_URL: redis://redis:6379
-      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672
       SESSION_SECRET: ${SESSION_SECRET}
       CORS_ORIGIN: ${CORS_ORIGIN}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
@@ -56,8 +55,6 @@ services:
       GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL}
     depends_on:
       redis:
-        condition: service_healthy
-      rabbitmq:
         condition: service_healthy
       postgres:
         condition: service_healthy
@@ -80,7 +77,7 @@ services:
       CONTACT_CHALLENGE_SECRET: ${CONTACT_CHALLENGE_SECRET}
       TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY}
       TURNSTILE_ACTION: ${TURNSTILE_ACTION:-contact}
-      TURNSTILE_HOSTNAME: ${TURNSTILE_HOSTNAME}
+      TURNSTILE_HOSTNAME: ${TURNSTILE_HOSTNAME:?TURNSTILE_HOSTNAME is required}
       CONTACT_IP_ATTEMPT_LIMIT: ${CONTACT_IP_ATTEMPT_LIMIT:-100}
       CONTACT_IP_ATTEMPT_TTL_MS: ${CONTACT_IP_ATTEMPT_TTL_MS:-600000}
       CONTACT_COOKIE_SUBMISSION_LIMIT: ${CONTACT_COOKIE_SUBMISSION_LIMIT:-3}
