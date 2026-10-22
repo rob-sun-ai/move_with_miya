@@ -55,6 +55,11 @@ for name, service in services.items():
     )
 
 for name, service in services.items():
+    options = service.get('logging', {}).get('options', {})
+    check(
+        'max-size' in options and 'max-file' in options,
+        f'{name} rotates its container logs',
+    )
     check(
         ':' in service['image'] and not service['image'].endswith(':latest'),
         f'{name} pins an image tag',
