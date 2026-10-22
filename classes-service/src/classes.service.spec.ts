@@ -251,6 +251,82 @@ describe('ClassesService date validation', () => {
       );
     });
 
+    it.each([
+      ['name', { name: undefined }, 'name is required'],
+      ['name', { name: '  ' }, 'name must be a non-empty string'],
+      ['capacity', { capacity: undefined }, 'capacity is required'],
+      ['capacity', { capacity: true }, 'capacity must be a positive integer'],
+      [
+        'capacity',
+        { capacity: 3_000_000_000 },
+        'capacity must be a positive integer',
+      ],
+      ['locationId', { locationId: undefined }, 'locationId is required'],
+      [
+        'locationId',
+        { locationId: 'main' },
+        'locationId must be a positive integer',
+      ],
+      [
+        'teacherIds',
+        { teacherIds: 'user-1' },
+        'teacherIds must be an array of user ids',
+      ],
+      [
+        'teacherIds',
+        { teacherIds: [1] },
+        'teacherIds must be an array of user ids',
+      ],
+      [
+        'imageUrl',
+        { imageUrl: 'javascript:alert(1)' },
+        'imageUrl must be an http(s) URL',
+      ],
+      ['isPrivate', { isPrivate: 'yes' }, 'isPrivate must be a boolean'],
+      ['description', { description: 5 }, 'description must be a string'],
+      [
+        'startDate',
+        { startDate: '2026-09-01T10:00:00' },
+        'startDate must be an ISO 8601 date-time with a timezone',
+      ],
+      ['cost', { cost: [5] }, 'cost must be a non-negative number'],
+    ])('rejects an invalid %s', (_field, overrides, message) => {
+      expect(() => service.createClass({ ...base, ...overrides })).toThrow(
+        message,
+      );
+      expect(prisma.yogaClass.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects fields that are not class settings', () => {
+      expect(() =>
+        service.createClass({ ...base, id: 7, createdAt: '2020-01-01' }),
+      ).toThrow('Unknown fields: id, createdAt');
+    });
+
+    it('stores each teacher once and defaults to no teachers', async () => {
+      await service.createClass({
+        ...base,
+        teacherIds: ['user-1', 'user-2', 'user-1'],
+      });
+      await service.createClass({ ...base, teacherIds: undefined });
+
+      const calls = prisma.yogaClass.create.mock.calls as [
+        { data: { teacherIds: string[] } },
+      ][];
+      expect(calls[0][0].data.teacherIds).toEqual(['user-1', 'user-2']);
+      expect(calls[1][0].data.teacherIds).toEqual([]);
+    });
+
+    it('stores an empty image URL as no image', async () => {
+      await service.createClass({ ...base, imageUrl: '' });
+
+      expect(prisma.yogaClass.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ imageUrl: null }) as unknown,
+        }),
+      );
+    });
+
     it.each(['0', '15', '15.5', '15.50', 20])('accepts price %p', (cost) => {
       expect(() => service.createClass({ ...base, cost })).not.toThrow();
     });
@@ -331,6 +407,17 @@ describe('ClassesService date validation', () => {
         data: { name: 'Updated' },
         include: { location: true },
       });
+    });
+
+    it.each([
+      [{ location: { delete: true } }, 'Unknown fields: location'],
+      [{ updatedAt: '2020-01-01T00:00:00Z' }, 'Unknown fields: updatedAt'],
+      [{ name: null }, 'name must be a non-empty string'],
+      [{ status: 'Archived' }, 'status is invalid'],
+      [{ waitlistEnabled: 'false' }, 'waitlistEnabled must be a boolean'],
+    ])('rejects the update %j', (data, message) => {
+      expect(() => service.updateClass(1, data)).toThrow(message);
+      expect(prisma.yogaClass.update).not.toHaveBeenCalled();
     });
 
     it('parses a price update to a number', async () => {
@@ -463,9 +550,23 @@ describe('ClassesService date validation', () => {
       await expect(
         service.updateClass(1, {
           cancellationCutoffHours: 12,
-          refundPolicy: [{ hoursBeforeStart: 12, percentage: 50 }],
+          refundPolicy: [
+            { hoursBeforeStart: 12, percentage: 50 },
+            { hoursBeforeStart: 48, percentage: 100 },
+          ],
         }),
       ).resolves.toEqual({ id: 1 });
+      expect(prisma.yogaClass.update).toHaveBeenCalledWith({
+        where: { id: 1 },
+        data: {
+          cancellationCutoffHours: 12,
+          refundPolicy: [
+            { hoursBeforeStart: 48, percentage: 100 },
+            { hoursBeforeStart: 12, percentage: 50 },
+          ],
+        },
+        include: { location: true },
+      });
     });
   });
 });
