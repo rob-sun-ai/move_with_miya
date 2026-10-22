@@ -141,9 +141,9 @@ describe('AppController (e2e)', () => {
   });
 
   it('matches routes case-sensitively so proxy path rules cannot be dodged', async () => {
-    await request(app.getHttpServer()).get('/registration').expect(200);
-    await request(app.getHttpServer()).get('/REGISTRATION').expect(404);
-    await request(app.getHttpServer()).get('/Registration').expect(404);
+    await request(app.getHttpServer()).get('/metrics').expect(200);
+    await request(app.getHttpServer()).get('/METRICS').expect(404);
+    await request(app.getHttpServer()).get('/Metrics').expect(404);
   });
 
   it('does not advertise the framework', async () => {

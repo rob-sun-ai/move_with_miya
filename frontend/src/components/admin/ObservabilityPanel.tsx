@@ -23,6 +23,17 @@ interface ObservabilitySummary {
   services: Record<string, ServiceStatus>;
 }
 
+/** Only http(s) links are rendered, never e.g. a javascript: URL. */
+function safeExternalUrl(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    const { protocol } = new URL(url);
+    return protocol === 'https:' || protocol === 'http:' ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function ObservabilityPanel() {
   const [summary, setSummary] = useState<ObservabilitySummary | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -57,6 +68,7 @@ export default function ObservabilityPanel() {
   if (!summary) {
     return <Alert severity="info">Loading service health…</Alert>;
   }
+  const grafanaUrl = safeExternalUrl(summary.grafanaUrl);
 
   return (
     <Stack spacing={3}>
@@ -72,10 +84,10 @@ export default function ObservabilityPanel() {
         <Button variant="outlined" onClick={() => void load()}>
           Refresh
         </Button>
-        {summary.grafanaUrl && (
+        {grafanaUrl && (
           <Button
             component="a"
-            href={summary.grafanaUrl}
+            href={grafanaUrl}
             target="_blank"
             rel="noreferrer"
             variant="outlined"

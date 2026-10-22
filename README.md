@@ -9,8 +9,8 @@ A microservices-based yoga studio management platform.
 | `frontend` | Next.js | 5173 | Client app |
 | `backend` | NestJS | 3002 | API gateway |
 | `user-service` | NestJS | 3003 | Auth & user management |
-| `classes-service` | NestJS | — | Class scheduling (event-driven) |
-| `registration-service` | NestJS | — | Class registrations (event-driven) |
+| `classes-service` | NestJS | 3004 (health/metrics) | Class scheduling (event-driven) |
+| `registration-service` | NestJS | 3005 (health/metrics) | Class registrations (event-driven) |
 | `nginx` | nginx | 80 / 443 | Reverse proxy and TLS (production only; in development Next.js proxies `/api/*`) |
 | `postgres` | PostgreSQL 16 | 5433 (host) | Databases: `miya_users`, `miya_classes`, `miya_registrations` |
 | `redis` | Redis 7 | 6379 | Session store |

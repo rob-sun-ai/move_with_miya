@@ -11,10 +11,10 @@ import session from 'express-session';
 import { AppModule } from './app.module';
 import { RedisService } from './redis.service';
 import type { RedisClient } from './redis.service';
-import { createExpressServer } from './express-server';
 import express from 'express';
 import { requestTelemetry } from './metrics';
 import { assertProductionConfig } from './config-validation';
+import { createExpressServer } from './express-server';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { RedisStore } = require('connect-redis') as {
@@ -91,7 +91,7 @@ async function bootstrap() {
       saveUninitialized: false,
       cookie: {
         httpOnly: true,
-        secure: configService.get<string>('NODE_ENV') === 'production',
+        secure: nodeEnv === 'production',
         sameSite: 'lax',
         maxAge: 7 * 24 * 60 * 60 * 1000,
       },

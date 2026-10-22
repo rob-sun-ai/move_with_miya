@@ -78,6 +78,18 @@ describe('ObservabilityPanel', () => {
     expect(link).toHaveAttribute('rel', 'noreferrer');
   });
 
+  it.each(['javascript:alert(1)', 'not a url'])(
+    'does not link to a Grafana URL of %s',
+    async (grafanaUrl) => {
+      apiMock.mockResolvedValue({ ...summary, grafanaUrl });
+
+      await renderPanel();
+
+      expect(screen.getByText('backend')).toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: 'Open Grafana' })).toBeNull();
+    },
+  );
+
   it.each([
     [new Error('Forbidden'), 'Forbidden'],
     ['offline', 'Unable to load observability data.'],
