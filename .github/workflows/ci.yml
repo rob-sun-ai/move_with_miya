@@ -77,18 +77,10 @@ jobs:
           --health-timeout 3s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - uses: actions/cache@v4
-        with:
-          path: |
-            **/node_modules
-            **/src/generated
-          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json', '**/prisma/schema.prisma') }}
+      - uses: ./.github/actions/node-deps
       # Applies every migration to an empty database, then fails if the
       # Prisma schema (including partial indexes) differs from the result.
       - name: Apply migrations and check for schema drift
