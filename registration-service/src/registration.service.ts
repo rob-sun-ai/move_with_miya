@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { RpcException } from '@nestjs/microservices';
+import type { Payment } from './generated/prisma/client';
 import { PrismaService } from './prisma/prisma.service';
 
 class RpcError extends RpcException {
@@ -82,24 +83,6 @@ function assertRefundPercentage(percentage: number) {
   }
 }
 
-/** A refund that was requested and has not succeeded yet. */
-function isRefundInFlight(refundStatus: string) {
-  return refundStatus === 'Pending' || refundStatus === 'Failed';
-}
-
-/** Payment fields that request a refund of `percentage` of the amount paid. */
-function refundRequest(amountCents: number, percentage: number) {
-  const refundAmountCents = Math.floor((amountCents * percentage) / 100);
-  return {
-    refundPercentage: percentage,
-    refundAmountCents,
-    refundRequestedAt: new Date(),
-    refundStatus:
-      refundAmountCents > 0 ? ('Pending' as const) : ('NotEligible' as const),
-    refundError: null,
-  };
-}
-
 const SERIALIZABLE_MAX_ATTEMPTS = 5;
 
 /**
@@ -140,6 +123,47 @@ const EDITABLE_REGISTRATION_FIELDS = new Set(['cancellationReason']);
 const NOTIFICATION_LEASE_MS = 5 * 60 * 1_000;
 
 const MAX_CONTACT_PAGE_SIZE = 100;
+
+/** Automatic refund retries stop after this many failures. */
+export const MAX_REFUND_ATTEMPTS = 10;
+
+/** Failed refunds the retry sweep has given up on; an admin must act. */
+export const REFUND_NEEDS_ATTENTION_WHERE = {
+  refundStatus: 'Failed' as const,
+  refundAttempts: { gte: MAX_REFUND_ATTEMPTS },
+};
+
+/**
+ * How long a refund sweep owns the refunds it claimed. Long enough for one
+ * sweep to finish; a crashed sweeper's claims become due again afterwards.
+ */
+const REFUND_CLAIM_LEASE_MS = 15 * 60_000;
+
+/** Exponential backoff between refund retries: 2, 4, … 256 minutes. */
+function refundRetryDelayMs(attempts: number) {
+  return 2 ** Math.min(attempts, 8) * 60_000;
+}
+
+/** A refund that was requested and has not succeeded yet. */
+function isRefundInFlight(refundStatus: string) {
+  return refundStatus === 'Pending' || refundStatus === 'Failed';
+}
+
+/** Payment fields that request a refund of `percentage` of the amount paid. */
+function refundRequest(amountCents: number, percentage: number) {
+  const refundAmountCents = Math.floor((amountCents * percentage) / 100);
+  return {
+    refundPercentage: percentage,
+    refundAmountCents,
+    refundRequestedAt: new Date(),
+    refundStatus:
+      refundAmountCents > 0 ? ('Pending' as const) : ('NotEligible' as const),
+    refundError: null,
+    // A new request is retried immediately with a fresh attempt budget.
+    refundAttempts: 0,
+    refundAvailableAt: new Date(),
+  };
+}
 
 @Injectable()
 export class RegistrationService {
@@ -688,6 +712,9 @@ export class RegistrationService {
           // applies.
           refundStatus: 'Pending',
           refundError: null,
+          // Stripe is still processing it; the refund webhook normally
+          // completes it first, so only re-check occasionally.
+          refundAvailableAt: new Date(Date.now() + 60 * 60_000),
         },
       });
     });
@@ -695,6 +722,8 @@ export class RegistrationService {
 
   async failPaymentRefund(paymentId: string, error: string) {
     assertKey(paymentId, 'Payment');
+    // Serializable so concurrent failure reports each count an attempt and a
+    // refund completed meanwhile is seen rather than overwritten.
     return this.runSerializable(async (tx) => {
       const payment = await tx.payment.findUnique({
         where: { id: paymentId },
@@ -703,29 +732,59 @@ export class RegistrationService {
       // A late or duplicate failure report must not undo a finished refund,
       // nor mark one that was never requested.
       if (!isRefundInFlight(payment.refundStatus)) return payment;
+      const refundAttempts = payment.refundAttempts + 1;
       return tx.payment.update({
         where: { id: paymentId },
         data: {
           refundStatus: 'Failed',
           refundError: errorMessage(error) ?? 'Refund failed',
+          refundAttempts,
+          refundAvailableAt: new Date(
+            Date.now() + refundRetryDelayMs(refundAttempts),
+          ),
         },
       });
     });
   }
 
+  /**
+   * Claims the 100 soonest-due refunds for one sweep. Each claimed row is
+   * leased by pushing `refundAvailableAt` forward, and rows another sweeper
+   * is claiming are skipped, so concurrent sweeps never share a row. The
+   * sweep's outcome (or the lease expiring) decides the next attempt.
+   */
   listRefundPendingPayments() {
-    return this.prisma.client.payment.findMany({
-      where: { refundStatus: { in: ['Pending', 'Failed'] } },
-      orderBy: { updatedAt: 'asc' },
-      take: 100,
-    });
+    const now = new Date();
+    const leasedUntil = new Date(now.getTime() + REFUND_CLAIM_LEASE_MS);
+    return this.prisma.client.$queryRaw<Payment[]>`
+      WITH due AS (
+        SELECT "id"
+        FROM "Payment"
+        WHERE "refundStatus" IN ('Pending', 'Failed')
+          AND "refundAvailableAt" <= ${now}
+          AND "refundAttempts" < ${MAX_REFUND_ATTEMPTS}
+        ORDER BY "refundAvailableAt" ASC
+        LIMIT 100
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE "Payment" AS p
+      SET "refundAvailableAt" = ${leasedUntil}
+      FROM due
+      WHERE p."id" = due."id"
+      RETURNING p.*`;
   }
 
-  getAllPayments() {
-    return this.prisma.client.payment.findMany({
+  async getAllPayments() {
+    const payments = await this.prisma.client.payment.findMany({
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: 500,
     });
+    return payments.map((payment) => ({
+      ...payment,
+      refundNeedsAttention:
+        payment.refundStatus === REFUND_NEEDS_ATTENTION_WHERE.refundStatus &&
+        payment.refundAttempts >= MAX_REFUND_ATTEMPTS,
+    }));
   }
 
   async recordStripeWebhookEvent(data: {

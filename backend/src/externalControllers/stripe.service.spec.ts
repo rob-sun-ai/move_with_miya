@@ -12,6 +12,7 @@ describe('StripeService', () => {
   let service: StripeService;
   let registrationClient: { send: jest.Mock };
   let classesClient: { send: jest.Mock };
+  let sendCommand: jest.Mock;
   let stripeMock: {
     checkout: {
       sessions: { create: jest.Mock; retrieve: jest.Mock; expire: jest.Mock };
@@ -22,6 +23,7 @@ describe('StripeService', () => {
   beforeEach(() => {
     registrationClient = { send: jest.fn() };
     classesClient = { send: jest.fn() };
+    sendCommand = jest.fn().mockResolvedValue('OK');
     stripeMock = {
       checkout: {
         sessions: {
@@ -51,6 +53,7 @@ describe('StripeService', () => {
       } as never,
       registrationClient as never,
       classesClient as never,
+      { getClient: () => ({ sendCommand }) } as never,
     );
   });
 
@@ -509,6 +512,40 @@ describe('StripeService', () => {
         amountCents: 1250,
       },
     );
+  });
+
+  describe('refund retry sweep', () => {
+    beforeEach(() => {
+      registrationClient.send.mockImplementation(({ cmd }: { cmd: string }) =>
+        of(cmd === 'list_refund_pending_payments' ? [] : {}),
+      );
+    });
+
+    it('sweeps due refunds when it holds the lock', async () => {
+      await service.retryRefunds();
+
+      expect(sendCommand).toHaveBeenCalledWith(
+        expect.arrayContaining(['SET', 'NX', 'PX']),
+      );
+      expect(registrationClient.send).toHaveBeenCalledWith(
+        { cmd: 'list_refund_pending_payments' },
+        {},
+      );
+    });
+
+    it('skips the sweep while another instance holds the lock', async () => {
+      sendCommand.mockResolvedValue(null);
+
+      await service.retryRefunds();
+
+      expect(registrationClient.send).not.toHaveBeenCalled();
+    });
+
+    it('does not overlap sweeps within one instance', async () => {
+      await Promise.all([service.retryRefunds(), service.retryRefunds()]);
+
+      expect(sendCommand).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('completes a locally pending refund only with the exact Stripe amount', async () => {

@@ -67,6 +67,8 @@ model Payment {
   refundRequestedAt        DateTime?
   refundedAt               DateTime?
   refundError              String?
+  refundAttempts           Int            @default(0)
+  refundAvailableAt        DateTime       @default(now())
   expiresAt                DateTime
   paidAt                   DateTime?
   createdAt                DateTime       @default(now())
@@ -80,7 +82,7 @@ model Payment {
   @@index([userId, classId, status])
   @@index([classId, status])
   @@index([status, expiresAt])
-  @@index([refundStatus, updatedAt])
+  @@index([refundStatus, refundAvailableAt])
 }
 
 model StripeWebhookEvent {
