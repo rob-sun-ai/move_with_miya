@@ -10,7 +10,7 @@
 6. Register the Stripe webhook at `/api/checkout/webhook`.
 7. Set a strong `GRAFANA_ADMIN_PASSWORD`; do not expose Grafana's container port publicly.
 
-The populated environment file must live outside the repository with restrictive file permissions (`chmod 600`).
+The populated environment file must live outside the repository with restrictive file permissions (`chmod 600`). Run `./ops/preflight-production.sh` (with the file's variables exported) before the first deployment; `deploy.sh` runs it on every deploy.
 
 `POSTGRES_PASSWORD` and `RABBITMQ_PASS` are embedded in connection URLs, so they must be URL-safe (letters, digits, `-`, `_`, `.`, `~`); `openssl rand -hex 32` generates a suitable one. `RELEASE_VERSION` is required and tags every image, so set it to the commit being deployed.
 
@@ -30,7 +30,7 @@ CI enforces these rules: `ops/check-compose.py` checks the Compose invariants (o
 
 ## TLS certificates
 
-nginx mounts `TLS_CERT_DIR` (default `/etc/letsencrypt`) read-only at the same path, so `TLS_CERT_FILE` and `TLS_KEY_FILE` must point inside it. Certbot makes its `live/` and `archive/` directories root-only, so start the stack as root or grant that user read access. Mounting the whole tree keeps Let's Encrypt's `live/` symlinks resolving to the current `archive/` files after a renewal. Port 80 serves `/.well-known/acme-challenge/` from `ACME_WEBROOT` (default `/var/www/acme`) and redirects everything else to HTTPS.
+nginx mounts `TLS_CERT_DIR` (default `/etc/letsencrypt`) read-only at the same path, so `TLS_CERT_FILE` and `TLS_KEY_FILE` must point inside it. The preflight checks both, and that they are readable by the user running `deploy.sh`; certbot makes its `live/` and `archive/` directories root-only, so run deploys as root or grant that user read access. Mounting the whole tree keeps Let's Encrypt's `live/` symlinks resolving to the current `archive/` files after a renewal. Port 80 serves `/.well-known/acme-challenge/` from `ACME_WEBROOT` (default `/var/www/acme`) and redirects everything else to HTTPS.
 
 Run certbot on the host. nginx can't start without a certificate, so issue the first one with the standalone plugin before the stack is up, then switch renewals to the webroot that nginx serves:
 
@@ -139,4 +139,36 @@ compose up -d --no-deps --force-recreate nginx
 
 Files that are not in `BACKUP_DIR` are fetched from `RESTORE_REMOTE`, a remote using the read key (the server's own key can only upload). Checksums are verified before anything is restored. Each dump is restored in a single transaction into a fresh `<database>_restore` database; only after all three succeed are the live databases dropped (`WITH (FORCE)`, closing any remaining connections) and replaced. A failed restore therefore leaves production data as it was (a leftover `*_restore` database is dropped by the next attempt), and tables created by migrations after the backup do not survive a successful one. Remove the read key and the private age key from the server afterwards.
 
-The backup and restore scripts are tested by `ops/tests/run.sh` (real age and rclone, with a Docker test double), which CI runs together with shellcheck.
+The backup, restore, preflight, smoke, deploy, and rollback scripts are tested by `ops/tests/run.sh` (real age and rclone, with Docker and curl test doubles), which CI runs together with shellcheck.
+
+## Deploy
+
+```bash
+ENV_FILE=/path/to/.env.production ./ops/deploy.sh
+```
+
+The deployment runs the preflight checks, builds images tagged `move-with-miya/<service>:<git-sha>` for the checked-out commit, starts infrastructure, takes an encrypted backup, runs each Prisma migration as a one-shot job, starts application services and waits until they are healthy, recreates nginx, starts the monitoring and alerting services, and performs public health checks. A failed backup or migration stops the rollout. `RELEASE_VERSION` is written back to the environment file only after the smoke checks pass; if the services stay unhealthy, nginx cannot be recreated, or the smoke checks fail, the new release is left in place and the script prints the `rollback.sh` command for the previously recorded release. The deploy refuses to run from a checkout with uncommitted changes to tracked files (the images would not match the commit they are tagged with), and only one deploy or rollback runs on a host at a time (a `flock` on `.git/move-with-miya-deploy.lock`, which the workflow below also holds while it switches the checkout).
+
+Deploys are **not zero-downtime**: containers are replaced in place, so requests fail for the seconds between a service being stopped and its replacement passing its healthcheck, plus the nginx restart. Deploy at a quiet time.
+
+The manual GitHub Actions workflow requires environment-scoped `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_PATH`, `DEPLOY_ENV_FILE`, `DEPLOY_SSH_KEY`, and `DEPLOY_KNOWN_HOSTS` secrets. It supports both deploy and application rollback operations, validates the operation and the 40-character SHA before connecting to the host, verifies the host key against `DEPLOY_KNOWN_HOSTS`, and runs one operation per environment at a time (later runs queue). Protect the environments with required reviewers: anyone who can dispatch the workflow can deploy any commit reachable from `origin`.
+
+## Rollback
+
+```bash
+ROLLBACK_VERSION=<previous-sha> ENV_FILE=/path/to/.env.production ./ops/rollback.sh
+```
+
+Rollback restarts the application services on the images previously built on this host for `<previous-sha>`; it fails if those images are not present (deploy that commit instead). It waits for them to be healthy, then recreates nginx and runs the smoke checks. Only the images change: the compose file, nginx config, and ops scripts of the current checkout stay in use, so if the newer release changed `docker-compose.prod.yml` (new required variables, renamed services) or the nginx config, check that they still work with the older images, or check out `<previous-sha>` and run `deploy.sh` instead. Like a deploy, a rollback briefly interrupts service. Database migrations are not automatically reversed, and rollback does not run the older release's migration jobs. For an incompatible schema change, restore the pre-deploy backup (see "Recovering production").
+
+## Authenticated smoke checklist
+
+- Complete Google login through the HTTPS proxy and confirm the session cookie is secure.
+- Load a class and class detail page.
+- Update a profile field.
+- Submit a test contact form and verify persistence/email behavior.
+- Create and cancel a free registration.
+- Complete Stripe test checkout and confirm webhook fulfillment.
+- Confirm an admin can view the observability tab.
+- Confirm a non-admin receives `403` for the observability endpoint.
+- Confirm Grafana dashboards, a test alert email, the latest backup in B2, and deployment logs are available.

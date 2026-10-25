@@ -168,10 +168,10 @@ npm run audit:fix     # npm audit fix across all services
 ## Production
 
 ```bash
-docker compose --env-file /path/to/.env.production -f docker-compose.prod.yml up -d --build
+ENV_FILE=/path/to/.env.production ./ops/deploy.sh
 ```
 
-Use [.env.production.example](.env.production.example) as the configuration matrix and store the populated file outside the repository. Database migrations run as one-shot jobs before the services that depend on them start. See [docs/production-runbook.md](docs/production-runbook.md).
+Use [.env.production.example](.env.production.example) as the configuration matrix and store the populated file outside the repository. The deployment script validates configuration, backs up the databases, runs migrations as one-shot jobs, starts the application and monitoring services, and runs public smoke checks. See [docs/production-runbook.md](docs/production-runbook.md) for rollback, alerting, and backups.
 
 The production stack requires:
 

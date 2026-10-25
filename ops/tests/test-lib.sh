@@ -100,4 +100,69 @@ test_app_databases_match_postgres_init() {
   assert_eq "$(. ./ops/lib.sh && echo "$APP_DATABASES")" "$expected"
 }
 
+test_assert_git_sha_accepts_full_hex_shas() {
+  (. ./ops/lib.sh && assert_git_sha V 0123456789abcdef0123456789abcdef01234567 \
+    && assert_git_sha V 0123456789ABCDEF0123456789ABCDEF01234567) \
+    || fail 'expected valid SHAs to pass'
+}
+
+test_assert_git_sha_rejects_anything_else() {
+  for value in '' abc 0123456789abcdef0123456789abcdef0123456 \
+    0123456789abcdef0123456789abcdef012345678 \
+    g123456789abcdef0123456789abcdef01234567 '0123456789abcdef0123456789abcdef0123456 '; do
+    output=$( (. ./ops/lib.sh && assert_git_sha ROLLBACK_VERSION "$value") 2>&1) \
+      && fail "accepted '$value'"
+    assert_contains "$output" 'ROLLBACK_VERSION must be a 40-character Git SHA'
+  done
+}
+
+test_persist_release_version_replaces_the_recorded_release() {
+  printf 'A=1\nRELEASE_VERSION=old\nB=2\n' > "$ENV_FILE"
+  (. ./ops/lib.sh && persist_release_version abc)
+  assert_eq "$(cat "$ENV_FILE")" 'A=1
+RELEASE_VERSION=abc
+B=2'
+}
+
+test_persist_release_version_adds_a_missing_release() {
+  printf 'A=1\n' > "$ENV_FILE"
+  (. ./ops/lib.sh && persist_release_version abc)
+  assert_eq "$(cat "$ENV_FILE")" 'A=1
+RELEASE_VERSION=abc'
+}
+
+test_restart_nginx_recreates_only_nginx() {
+  (. ./ops/lib.sh && restart_nginx)
+  assert_eq "$(cat "$SHIM_DIR/docker.log")" \
+    "compose --env-file $ENV_FILE -f docker-compose.prod.yml up -d --no-deps --force-recreate nginx"
+}
+
+test_persist_release_version_appends_after_a_last_line_without_newline() {
+  printf 'A=1' > "$ENV_FILE"
+  (. ./ops/lib.sh && persist_release_version abc)
+  assert_eq "$(cat "$ENV_FILE")" 'A=1
+RELEASE_VERSION=abc'
+}
+
+test_restart_nginx_does_not_start_its_dependencies_or_migrations() {
+  (. ./ops/lib.sh && restart_nginx)
+  assert_eq "$(cat "$SHIM_DIR/started.log")" nginx
+}
+
+test_acquire_deploy_lock_refuses_while_another_run_holds_it() {
+  export DEPLOY_LOCK_FILE="$SANDBOX/deploy.lock"
+  exec 8> "$DEPLOY_LOCK_FILE"
+  flock -n 8 || fail 'could not take the lock in the test'
+  output=$( (. ./ops/lib.sh && acquire_deploy_lock) 2>&1) && fail 'expected failure'
+  assert_contains "$output" 'Another deploy or rollback is running on this host'
+  exec 8>&-
+  (. ./ops/lib.sh && acquire_deploy_lock) || fail 'lock should be free again'
+}
+
+test_acquire_deploy_lock_is_released_when_the_script_exits() {
+  export DEPLOY_LOCK_FILE="$SANDBOX/deploy.lock"
+  (. ./ops/lib.sh && acquire_deploy_lock) || fail 'first run should get the lock'
+  (. ./ops/lib.sh && acquire_deploy_lock) || fail 'second run should get the lock'
+}
+
 run_tests

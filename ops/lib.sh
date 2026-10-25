@@ -69,3 +69,45 @@ require_command() {
     }
   done
 }
+
+# Usage: assert_git_sha NAME VALUE
+assert_git_sha() {
+  case "$2" in
+    *[!A-Fa-f0-9]*|'') echo "$1 must be a 40-character Git SHA" >&2; exit 1 ;;
+  esac
+  [ "${#2}" -eq 40 ] || { echo "$1 must be a 40-character Git SHA" >&2; exit 1; }
+}
+
+# Recreates nginx after the application containers it proxies were replaced.
+# A reload would re-resolve the upstream addresses but not apply a new
+# nginx.prod.conf: the image renders the template only at container start,
+# and the single-file bind mount keeps the file as it was before `git checkout`.
+# --no-deps: never converge the app services or their migration jobs from
+# here (a rollback must not run the older release's migrations).
+restart_nginx() {
+  compose up -d --no-deps --force-recreate nginx
+}
+
+# Holds an exclusive lock for the rest of the calling script, so deploys and
+# rollbacks on this host never overlap. The lock is released on exit.
+acquire_deploy_lock() {
+  require_command flock
+  lock_file=${DEPLOY_LOCK_FILE:-$(git rev-parse --git-path move-with-miya-deploy.lock)}
+  exec 9> "$lock_file"
+  flock -n 9 || {
+    echo "Another deploy or rollback is running on this host (lock: $lock_file)" >&2
+    exit 1
+  }
+}
+
+# Records the running release in the env file so later compose commands and
+# rollbacks resolve the same image tags.
+persist_release_version() {
+  if grep -q '^RELEASE_VERSION=' "$ENV_FILE"; then
+    sed -i "s/^RELEASE_VERSION=.*/RELEASE_VERSION=$1/" "$ENV_FILE"
+  else
+    # Do not glue the new line onto a last line that lacks a newline.
+    [ -z "$(tail -c 1 "$ENV_FILE")" ] || echo >> "$ENV_FILE"
+    printf 'RELEASE_VERSION=%s\n' "$1" >> "$ENV_FILE"
+  fi
+}

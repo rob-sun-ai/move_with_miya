@@ -211,7 +211,7 @@ jobs:
       - name: Lint shell scripts
         run: >-
           shellcheck -x --severity=warning ops/*.sh ops/tests/*.sh
-          ops/tests/shims/docker nginx/test-routing.sh
+          ops/tests/shims/docker ops/tests/shims/curl nginx/test-routing.sh
           ops/observability/test-alertmanager.sh
           ops/observability/alertmanager-entrypoint.sh
       - name: Test ops scripts
