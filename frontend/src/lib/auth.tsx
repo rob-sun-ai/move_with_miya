@@ -52,6 +52,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // is still on screen and the client router cache (which back navigation
     // would replay admin or dashboard data from), and shows whether the
     // session really ended.
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- a full reload is the point
     window.location.assign('/classes');
   }, []);
 
