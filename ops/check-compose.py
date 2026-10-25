@@ -55,6 +55,11 @@ for name, service in services.items():
     )
 
 for name, service in services.items():
+    options = service.get('logging', {}).get('options', {})
+    check(
+        'max-size' in options and 'max-file' in options,
+        f'{name} rotates its container logs',
+    )
     check(
         ':' in service['image'] and not service['image'].endswith(':latest'),
         f'{name} pins an image tag',
@@ -94,6 +99,27 @@ for upstream in ('backend', 'frontend', 'user-service'):
         == 'service_healthy',
         f'nginx waits for a healthy {upstream}',
     )
+
+for name, service in services.items():
+    logging = service.get('logging', {})
+    check(
+        logging.get('driver') == 'json-file'
+        and 'com.docker.compose.service'
+        in logging.get('options', {}).get('labels', ''),
+        f'{name} logs record its Compose service name for Promtail',
+    )
+
+if os.path.exists('ops/observability/prometheus.yml'):
+    with open('ops/observability/prometheus.yml', encoding='utf-8') as file:
+        prometheus = file.read()
+    for app in APPS:
+        if app == 'frontend':
+            continue
+        target = f"'{app}:{services[app]['expose'][0]}'"
+        check(
+            target in prometheus,
+            f'Prometheus scrapes {app} on its exposed port',
+        )
 
 if failures:
     sys.exit(f'{len(failures)} compose check(s) failed')

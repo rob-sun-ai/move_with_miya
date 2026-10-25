@@ -1,0 +1,28 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: docker
+          __path__: /var/lib/docker/containers/*/*-json.log
+    pipeline_stages:
+      # docker-compose.prod.yml has json-file record the Compose service name
+      # in each line's attrs; lift it into a label before the docker stage
+      # reduces the line to the log message.
+      - json:
+          expressions:
+            service: 'attrs."com.docker.compose.service"'
+      - labels:
+          service:
+      - docker: {}

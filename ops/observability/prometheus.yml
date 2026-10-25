@@ -1,0 +1,20 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: backend
+    static_configs:
+      - targets: ['backend:3000']
+  - job_name: user-service
+    static_configs:
+      - targets: ['user-service:3001']
+  - job_name: classes-service
+    static_configs:
+      - targets: ['classes-service:3004']
+  - job_name: registration-service
+    static_configs:
+      - targets: ['registration-service:3005']
+  - job_name: prometheus
+    static_configs:
+      - targets: ['prometheus:9090']
