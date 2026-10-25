@@ -45,6 +45,8 @@ describe('AppController (e2e)', () => {
       consumeUser: jest.fn().mockResolvedValue(allowed),
       consumeRefundIp: jest.fn().mockResolvedValue(allowed),
       consumeStatusIp: jest.fn().mockResolvedValue(allowed),
+      consumeRefundUser: jest.fn().mockResolvedValue(allowed),
+      consumeStatusUser: jest.fn().mockResolvedValue(allowed),
       applyHeaders: jest.fn(),
     };
     const moduleFixture: TestingModule = await Test.createTestingModule({

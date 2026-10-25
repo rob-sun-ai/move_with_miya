@@ -104,6 +104,8 @@ describe('CheckoutRateLimitGuard', () => {
       consumeUser: jest.fn().mockResolvedValue(decision),
       consumeRefundIp: jest.fn().mockResolvedValue(decision),
       consumeStatusIp: jest.fn().mockResolvedValue(decision),
+      consumeRefundUser: jest.fn().mockResolvedValue(decision),
+      consumeStatusUser: jest.fn().mockResolvedValue(decision),
       applyHeaders: jest.fn(),
       ...overrides,
     };
@@ -129,11 +131,12 @@ describe('CheckoutRateLimitGuard', () => {
       '/checkout/payments/refund',
       '198.51.100.1',
     );
-    expect(service.consumeUser).toHaveBeenCalledWith(
+    expect(service.consumeRefundUser).toHaveBeenCalledWith(
       '/checkout/payments/refund',
       'user-1',
     );
     expect(service.consumeIp).not.toHaveBeenCalled();
+    expect(service.consumeUser).not.toHaveBeenCalled();
     expect(service.applyHeaders).toHaveBeenCalledWith(response, decision, 'IP');
     expect(service.applyHeaders).toHaveBeenCalledWith(
       response,
@@ -151,11 +154,11 @@ describe('CheckoutRateLimitGuard', () => {
     await guard.canActivate(refund('/checkout/payments/p1/refund'));
     await guard.canActivate(refund('/checkout/payments/p2/refund'));
 
-    const [first, second] = service.consumeUser.mock.calls as unknown[][];
+    const [first, second] = service.consumeRefundUser.mock.calls as unknown[][];
     expect(second).toEqual(first);
   });
 
-  it('gives status lookups their own IP bucket and no member limit', async () => {
+  it('gives status lookups their own IP and member buckets', async () => {
     const service = serviceWith();
     const guard = guardFor(service);
     const { context: executionContext, response } = context('/checkout/status');
@@ -165,10 +168,32 @@ describe('CheckoutRateLimitGuard', () => {
       '/checkout/status',
       '198.51.100.1',
     );
+    expect(service.consumeStatusUser).toHaveBeenCalledWith(
+      '/checkout/status',
+      'user-1',
+    );
     expect(service.consumeIp).not.toHaveBeenCalled();
     expect(service.consumeUser).not.toHaveBeenCalled();
-    expect(service.applyHeaders).toHaveBeenCalledTimes(1);
     expect(service.applyHeaders).toHaveBeenCalledWith(response, decision, 'IP');
+    expect(service.applyHeaders).toHaveBeenCalledWith(
+      response,
+      decision,
+      'User',
+    );
+  });
+
+  it('blocks status lookups once the member bucket is exhausted', async () => {
+    const guard = guardFor(
+      serviceWith({
+        consumeStatusUser: jest
+          .fn()
+          .mockResolvedValue({ ...decision, allowed: false }),
+      }),
+    );
+
+    await expect(
+      guard.canActivate(context('/checkout/status').context),
+    ).rejects.toMatchObject({ status: 429 });
   });
 
   it.each(['/CHECKOUT/Create-Session', '/checkout/create-session/'])(

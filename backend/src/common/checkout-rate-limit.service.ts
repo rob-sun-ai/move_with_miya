@@ -10,6 +10,8 @@ import {
 
 export type CheckoutRateLimitDecision = RateLimitDecision;
 
+const WINDOW_MS = 60 * 1000;
+
 @Injectable()
 export class CheckoutRateLimitService {
   constructor(
@@ -17,12 +19,16 @@ export class CheckoutRateLimitService {
     private readonly configService: ConfigService,
   ) {}
 
+  // One-minute windows: a client blocked by mistake (members of an
+  // institution sharing one IP) recovers within a minute. Flood protection
+  // is nginx's per-second limit; these cap Stripe calls and seat holds.
+
   consumeIp(route: string, ip: string): Promise<CheckoutRateLimitDecision> {
     return this.consume(
       'ip',
       `${route}:${ip || 'unknown'}`,
-      this.getPositiveInteger('CHECKOUT_IP_ATTEMPT_LIMIT', 30),
-      this.getPositiveInteger('CHECKOUT_IP_ATTEMPT_TTL_MS', 10 * 60 * 1000),
+      this.getPositiveInteger('CHECKOUT_IP_ATTEMPT_LIMIT', 60),
+      this.getPositiveInteger('CHECKOUT_IP_ATTEMPT_TTL_MS', WINDOW_MS),
     );
   }
 
@@ -33,8 +39,8 @@ export class CheckoutRateLimitService {
     return this.consume(
       'user',
       `${route}:${userId || 'anonymous'}`,
-      this.getPositiveInteger('CHECKOUT_USER_ATTEMPT_LIMIT', 20),
-      this.getPositiveInteger('CHECKOUT_USER_ATTEMPT_TTL_MS', 10 * 60 * 1000),
+      this.getPositiveInteger('CHECKOUT_USER_ATTEMPT_LIMIT', 5),
+      this.getPositiveInteger('CHECKOUT_USER_ATTEMPT_TTL_MS', WINDOW_MS),
     );
   }
 
@@ -46,7 +52,19 @@ export class CheckoutRateLimitService {
       'refund-ip',
       `${route}:${ip || 'unknown'}`,
       this.getPositiveInteger('CHECKOUT_REFUND_ATTEMPT_LIMIT', 30),
-      this.getPositiveInteger('CHECKOUT_REFUND_ATTEMPT_TTL_MS', 10 * 60 * 1000),
+      this.getPositiveInteger('CHECKOUT_REFUND_ATTEMPT_TTL_MS', WINDOW_MS),
+    );
+  }
+
+  consumeRefundUser(
+    route: string,
+    userId: string,
+  ): Promise<CheckoutRateLimitDecision> {
+    return this.consume(
+      'refund-user',
+      `${route}:${userId || 'anonymous'}`,
+      this.getPositiveInteger('CHECKOUT_REFUND_USER_ATTEMPT_LIMIT', 10),
+      this.getPositiveInteger('CHECKOUT_REFUND_USER_ATTEMPT_TTL_MS', WINDOW_MS),
     );
   }
 
@@ -57,8 +75,20 @@ export class CheckoutRateLimitService {
     return this.consume(
       'status-ip',
       `${route}:${ip || 'unknown'}`,
-      this.getPositiveInteger('CHECKOUT_STATUS_ATTEMPT_LIMIT', 120),
-      this.getPositiveInteger('CHECKOUT_STATUS_ATTEMPT_TTL_MS', 10 * 60 * 1000),
+      this.getPositiveInteger('CHECKOUT_STATUS_ATTEMPT_LIMIT', 300),
+      this.getPositiveInteger('CHECKOUT_STATUS_ATTEMPT_TTL_MS', WINDOW_MS),
+    );
+  }
+
+  consumeStatusUser(
+    route: string,
+    userId: string,
+  ): Promise<CheckoutRateLimitDecision> {
+    return this.consume(
+      'status-user',
+      `${route}:${userId || 'anonymous'}`,
+      this.getPositiveInteger('CHECKOUT_STATUS_USER_ATTEMPT_LIMIT', 30),
+      this.getPositiveInteger('CHECKOUT_STATUS_USER_ATTEMPT_TTL_MS', WINDOW_MS),
     );
   }
 

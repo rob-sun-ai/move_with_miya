@@ -26,7 +26,7 @@ export class CheckoutRateLimitGuard implements CanActivate {
     const template = typeof routePath === 'string' ? routePath : 'checkout';
     const isRefund = template.endsWith('/refund');
     // The success page polls this read-only, member-scoped lookup while it
-    // waits for the webhook, so it gets its own generous per-IP bucket.
+    // waits for the webhook, so it gets its own, more generous buckets.
     const isStatus = template.endsWith('/status');
     // One refund bucket per admin, whichever payment is being refunded.
     const route = isRefund ? '/checkout/payments/refund' : template;
@@ -42,9 +42,13 @@ export class CheckoutRateLimitGuard implements CanActivate {
           : isStatus
             ? this.rateLimitService.consumeStatusIp(route, ip)
             : this.rateLimitService.consumeIp(route, ip),
-        userId && !isStatus
-          ? this.rateLimitService.consumeUser(route, userId)
-          : Promise.resolve(undefined),
+        !userId
+          ? Promise.resolve(undefined)
+          : isRefund
+            ? this.rateLimitService.consumeRefundUser(route, userId)
+            : isStatus
+              ? this.rateLimitService.consumeStatusUser(route, userId)
+              : this.rateLimitService.consumeUser(route, userId),
       ]);
     } catch {
       throw new ServiceUnavailableException(

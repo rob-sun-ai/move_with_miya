@@ -64,6 +64,46 @@ describe('CheckoutRateLimitService', () => {
     expect(command[4]).toBe('30000');
   });
 
+  it.each([
+    [
+      'refund',
+      'consumeRefundUser',
+      'CHECKOUT_REFUND_USER_ATTEMPT',
+      'refund-user',
+    ],
+    [
+      'status',
+      'consumeStatusUser',
+      'CHECKOUT_STATUS_USER_ATTEMPT',
+      'status-user',
+    ],
+  ] as const)(
+    'uses the per-member %s limits',
+    async (_label, method, setting, scope) => {
+      const service = new CheckoutRateLimitService(
+        redis,
+        new ConfigService({
+          SESSION_SECRET: 'test-secret',
+          [`${setting}_LIMIT`]: '7',
+          [`${setting}_TTL_MS`]: '30000',
+        }),
+      );
+
+      await expect(
+        service[method]('/checkout/route', 'user-1'),
+      ).resolves.toMatchObject({ allowed: true, limit: 7, remaining: 6 });
+      await service[method]('/checkout/route', '');
+      const [first, second] = sendCommand.mock.calls.map(
+        ([command]) => command as string[],
+      );
+      expect(first[3]).toMatch(
+        new RegExp(`^checkout-rate-limit:${scope}:[0-9a-f]{64}$`),
+      );
+      expect(first[4]).toBe('30000');
+      expect(second[3]).not.toBe(first[3]);
+    },
+  );
+
   it('uses the status limits for status lookups', async () => {
     const service = new CheckoutRateLimitService(
       redis,
@@ -131,14 +171,27 @@ describe('CheckoutRateLimitService', () => {
 
     await expect(
       service.consumeIp('/checkout/create-session', '198.51.100.1'),
-    ).resolves.toMatchObject({ limit: 30 });
+    ).resolves.toMatchObject({ limit: 60 });
     await expect(
       service.consumeUser('/checkout/create-session', 'user-1'),
-    ).resolves.toMatchObject({ limit: 20 });
+    ).resolves.toMatchObject({ limit: 5 });
+    await expect(
+      service.consumeRefundIp('/checkout/payments/refund', '198.51.100.1'),
+    ).resolves.toMatchObject({ limit: 30 });
+    await expect(
+      service.consumeRefundUser('/checkout/payments/refund', 'user-1'),
+    ).resolves.toMatchObject({ limit: 10 });
     await expect(
       service.consumeStatusIp('/checkout/status', '198.51.100.1'),
-    ).resolves.toMatchObject({ limit: 120 });
-    expect((sendCommand.mock.calls[0] as [string[]])[0][4]).toBe('600000');
+    ).resolves.toMatchObject({ limit: 300 });
+    await expect(
+      service.consumeStatusUser('/checkout/status', 'user-1'),
+    ).resolves.toMatchObject({ limit: 30 });
+    // Every bucket defaults to a one-minute window.
+    const windows = sendCommand.mock.calls.map(
+      ([command]) => (command as string[])[4],
+    );
+    expect(windows).toEqual(Array(6).fill('60000'));
   });
 
   it('refuses to count attempts without a hashing secret', async () => {
