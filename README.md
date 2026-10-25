@@ -168,10 +168,12 @@ npm run audit:fix     # npm audit fix across all services
 ## Production
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build
+docker compose --env-file /path/to/.env.production -f docker-compose.prod.yml up -d --build
 ```
 
-Requires the following to be set in `.env`:
+Use [.env.production.example](.env.production.example) as the configuration matrix and store the populated file outside the repository. Database migrations run as one-shot jobs before the services that depend on them start. See [docs/production-runbook.md](docs/production-runbook.md).
+
+The production stack requires:
 
 - `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
 - `RABBITMQ_USER`, `RABBITMQ_PASS`
@@ -181,12 +183,18 @@ Requires the following to be set in `.env`:
 - `GOOGLE_CALLBACK_URL`
 - `PUBLIC_APP_URL`
 - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and `STRIPE_CURRENCY`
+- `RESEND_API_KEY`, `CONTACT_EMAIL_TO`, and `RESEND_FROM_EMAIL`
+- `NEXT_PUBLIC_AUTH_URL` and `NEXT_PUBLIC_TURNSTILE_SITE_KEY` (inlined into the frontend image at build time)
+- `CONTACT_CHALLENGE_SECRET`, `TURNSTILE_SECRET_KEY`, and `TURNSTILE_HOSTNAME`
+- `PUBLIC_HOST`, `TLS_CERT_FILE`, and `TLS_KEY_FILE` (inside `TLS_CERT_DIR`, default `/etc/letsencrypt`)
+- `RELEASE_VERSION` (the image tag, e.g. the git SHA)
 
 Production checklist:
 
 - [ ] Use real, non-development secrets — never placeholders such as `change-me` or `guest`.
 - [ ] Set `CORS_ORIGIN` and `GOOGLE_CALLBACK_URL` to real deployment URLs, not `localhost`.
 - [ ] Set `PUBLIC_APP_URL` to the HTTPS public application URL and configure the Stripe webhook endpoint at `/api/checkout/webhook`.
+- [ ] Set `TLS_CERT_FILE` and `TLS_KEY_FILE` to the certificate/key inside `TLS_CERT_DIR`; production nginx redirects HTTP to HTTPS and serves TLS on port 443. Set up renewal as described in the runbook.
 - [ ] Use Stripe live credentials only in production and verify webhook signature failures are rejected.
 - [ ] Set checkout rate limits appropriate to the deployment and confirm Redis is reachable before accepting payments.
-- [ ] Verify `POSTGRES_PASSWORD` and `RABBITMQ_PASS` are unique, strong credentials before exposing the stack publicly.
+- [ ] Verify `POSTGRES_PASSWORD` and `RABBITMQ_PASS` are unique, strong, URL-safe credentials (they are embedded in connection URLs) before exposing the stack publicly.

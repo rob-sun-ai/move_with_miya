@@ -115,3 +115,67 @@ jobs:
       - uses: ./.github/actions/node-deps
       - run: npm test
       - run: npm run test:e2e --prefix backend
+
+  production-config:
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_USER: ci-user
+      POSTGRES_PASSWORD: ci-password
+      POSTGRES_DB: miya
+      RABBITMQ_USER: ci-rabbit
+      RABBITMQ_PASS: ci-rabbit-password
+      PUBLIC_HOST: ci.example.test
+      SESSION_SECRET: ci-session-secret-012345678901234567890123456789
+      CORS_ORIGIN: https://ci.example.test
+      PUBLIC_APP_URL: https://ci.example.test
+      GOOGLE_CLIENT_ID: ci-client-id
+      GOOGLE_CLIENT_SECRET: ci-client-secret
+      GOOGLE_CALLBACK_URL: https://ci.example.test/api/auth/google/callback
+      NEXT_PUBLIC_AUTH_URL: https://ci.example.test/api/auth/google
+      NEXT_PUBLIC_TURNSTILE_SITE_KEY: ci-turnstile-site-key
+      CONTACT_CHALLENGE_SECRET: ci-contact-challenge-secret
+      TURNSTILE_SECRET_KEY: ci-turnstile-secret
+      TURNSTILE_HOSTNAME: ci.example.test
+      RESEND_API_KEY: re_ci
+      CONTACT_EMAIL_TO: ci@example.test
+      RESEND_FROM_EMAIL: Move with Miya <ci@example.test>
+      STRIPE_SECRET_KEY: sk_test_ci
+      STRIPE_WEBHOOK_SECRET: whsec_ci
+      STRIPE_CURRENCY: usd
+      TLS_CERT_DIR: /tmp
+      TLS_CERT_FILE: /tmp/fullchain.pem
+      TLS_KEY_FILE: /tmp/privkey.pem
+      RELEASE_VERSION: ci
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Validate production Compose interpolation
+        run: docker compose -f docker-compose.prod.yml config --quiet
+      - name: Validate nginx configuration
+        run: |
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj "/CN=ci.example.test" \
+            -keyout /tmp/privkey.pem -out /tmp/fullchain.pem
+          docker run --rm \
+            --add-host user-service:127.0.0.1 \
+            --add-host frontend:127.0.0.1 \
+            --add-host backend:127.0.0.1 \
+            -e PUBLIC_HOST=ci.example.test \
+            -e TLS_CERT_FILE=/etc/nginx/tls/fullchain.pem \
+            -e TLS_KEY_FILE=/etc/nginx/tls/privkey.pem \
+            -v "$PWD/nginx/nginx.prod.conf:/etc/nginx/templates/default.conf.template:ro" \
+            -v /tmp/fullchain.pem:/etc/nginx/tls/fullchain.pem:ro \
+            -v /tmp/privkey.pem:/etc/nginx/tls/privkey.pem:ro \
+            nginx:1.31.7-alpine nginx -t
+      - name: Check Compose invariants
+        run: python3 ops/check-compose.py
+      - name: Exercise nginx routing
+        run: ./nginx/test-routing.sh
+      - name: Build production images
+        run: |
+          docker build -f backend/Dockerfile.prod backend
+          docker build -f user-service/Dockerfile.prod user-service
+          docker build -f classes-service/Dockerfile.prod classes-service
+          docker build -f registration-service/Dockerfile.prod registration-service
+          docker build --build-arg NEXT_PUBLIC_AUTH_URL=https://ci.example.test/api/auth/google frontend -f frontend/Dockerfile.prod
