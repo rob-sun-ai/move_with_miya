@@ -4,3 +4,5 @@ node_modules/
 !.env.example
 !.env.production.example
 .playwright-mcp/
+# Local database backups (ops/backup-postgres.sh), never committed.
+/backups/

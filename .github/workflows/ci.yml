@@ -199,3 +199,20 @@ jobs:
           docker build -f classes-service/Dockerfile.prod classes-service
           docker build -f registration-service/Dockerfile.prod registration-service
           docker build --build-arg NEXT_PUBLIC_AUTH_URL=https://ci.example.test/api/auth/google frontend -f frontend/Dockerfile.prod
+
+  ops-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install age and rclone
+        run: sudo apt-get update && sudo apt-get install -y age rclone
+      - name: Lint shell scripts
+        run: >-
+          shellcheck -x --severity=warning ops/*.sh ops/tests/*.sh
+          ops/tests/shims/docker nginx/test-routing.sh
+          ops/observability/test-alertmanager.sh
+          ops/observability/alertmanager-entrypoint.sh
+      - name: Test ops scripts
+        run: ./ops/tests/run.sh

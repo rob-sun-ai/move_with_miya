@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly Move with Miya PostgreSQL backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+# Run a missed backup at boot if the host was off at 03:30.
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target
