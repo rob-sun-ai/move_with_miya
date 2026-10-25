@@ -116,32 +116,20 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  /** Stripe expects lowercase ISO codes; accept USD as well as usd. */
+  private currency(): string {
+    return this.config.get<string>('STRIPE_CURRENCY', 'usd').toLowerCase();
+  }
+
   onModuleInit() {
-    if (this.config.get<string>('NODE_ENV') === 'production') {
-      const secret = this.config.get<string>('STRIPE_SECRET_KEY');
-      const webhookSecret = this.config.get<string>('STRIPE_WEBHOOK_SECRET');
-      const publicAppUrl = this.config.get<string>('PUBLIC_APP_URL');
-      const currency = this.config.get<string>('STRIPE_CURRENCY', 'usd');
-      let parsedUrl: URL | undefined;
-      try {
-        parsedUrl = publicAppUrl ? new URL(publicAppUrl) : undefined;
-      } catch {
-        parsedUrl = undefined;
-      }
-      if (!secret)
-        throw new Error('STRIPE_SECRET_KEY is required in production');
-      if (!webhookSecret)
-        throw new Error('STRIPE_WEBHOOK_SECRET is required in production');
-      if (!parsedUrl || parsedUrl.protocol !== 'https:')
-        throw new Error(
-          'PUBLIC_APP_URL must be a valid HTTPS URL in production',
-        );
-      if (!/^[a-z]{3}$/.test(currency))
-        throw new Error(
-          'STRIPE_CURRENCY must be a three-letter lowercase code',
-        );
-      if (UNSUPPORTED_CURRENCIES.has(currency))
-        throw new Error('STRIPE_CURRENCY must use two decimal places');
+    // Presence, placeholder, and HTTPS checks for the Stripe settings run in
+    // assertProductionConfig at bootstrap.
+    const currency = this.currency();
+    if (!/^[a-z]{3}$/.test(currency)) {
+      throw new Error('STRIPE_CURRENCY must be a three-letter currency code');
+    }
+    if (UNSUPPORTED_CURRENCIES.has(currency)) {
+      throw new Error('STRIPE_CURRENCY must use two decimal places');
     }
     this.retryTimer = setInterval(
       () => void this.retryRefunds(),
@@ -230,9 +218,7 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
         'Free classes use the free registration flow',
       );
     }
-    const currency = this.config
-      .get<string>('STRIPE_CURRENCY', 'usd')
-      .toLowerCase();
+    const currency = this.currency();
     if (!/^[a-z]{3}$/.test(currency) || UNSUPPORTED_CURRENCIES.has(currency)) {
       throw new ServiceUnavailableException(
         'Payment currency is not supported',

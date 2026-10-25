@@ -1,3 +1,4 @@
+import './telemetry';
 import { NestFactory } from '@nestjs/core';
 import {
   ExpressAdapter,
@@ -10,8 +11,10 @@ import session from 'express-session';
 import { AppModule } from './app.module';
 import { RedisService } from './redis.service';
 import type { RedisClient } from './redis.service';
-import { createExpressServer } from './express-server';
 import express from 'express';
+import { requestTelemetry } from './metrics';
+import { assertProductionConfig } from './config-validation';
+import { createExpressServer } from './express-server';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { RedisStore } = require('connect-redis') as {
@@ -29,7 +32,34 @@ async function bootstrap() {
       bodyParser: false,
     },
   );
+  // First, so CORS preflights and body-parser or session failures are still
+  // counted, logged, and tagged with a request ID.
+  app.use(requestTelemetry('backend'));
   const configService = app.get(ConfigService);
+  const nodeEnv = configService.get<string>('NODE_ENV');
+  const corsOrigin = configService.get<string>('CORS_ORIGIN');
+  const sessionSecret = configService.get<string>('SESSION_SECRET');
+  assertProductionConfig(configService, [
+    'SESSION_SECRET',
+    'CORS_ORIGIN',
+    'PUBLIC_APP_URL',
+    'STRIPE_SECRET_KEY',
+    'STRIPE_WEBHOOK_SECRET',
+    'STRIPE_CURRENCY',
+    'RESEND_API_KEY',
+    'CONTACT_EMAIL_TO',
+    'RESEND_FROM_EMAIL',
+    'CONTACT_CHALLENGE_SECRET',
+    'TURNSTILE_SECRET_KEY',
+    'TURNSTILE_HOSTNAME',
+    'REDIS_URL',
+    'RABBITMQ_URL',
+  ]);
+
+  app.enableCors({
+    origin: corsOrigin || 'http://localhost:5173',
+    credentials: true,
+  });
 
   app.connectMicroservice<MicroserviceOptions>({
     transport: Transport.RMQ,
@@ -42,10 +72,7 @@ async function bootstrap() {
     },
   });
 
-  app.set(
-    'trust proxy',
-    configService.get<string>('NODE_ENV') === 'production' ? 1 : false,
-  );
+  app.set('trust proxy', nodeEnv === 'production' ? 1 : false);
 
   const redisService = app.get(RedisService);
   await redisService.connect();
@@ -59,15 +86,12 @@ async function bootstrap() {
   app.use(
     session({
       store: new RedisStore({ client: redisService.getClient() }),
-      secret: configService.get<string>(
-        'SESSION_SECRET',
-        'dev-secret-change-in-production',
-      ),
+      secret: sessionSecret || 'dev-secret-change-in-production',
       resave: false,
       saveUninitialized: false,
       cookie: {
         httpOnly: true,
-        secure: configService.get<string>('NODE_ENV') === 'production',
+        secure: nodeEnv === 'production',
         sameSite: 'lax',
         maxAge: 7 * 24 * 60 * 60 * 1000,
       },

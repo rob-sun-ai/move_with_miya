@@ -21,6 +21,8 @@ import { StripeController } from './externalControllers/StripeController';
 import { StripeService } from './externalControllers/stripe.service';
 import { CheckoutRateLimitService } from './common/checkout-rate-limit.service';
 import { CheckoutRateLimitGuard } from './common/guards/checkout-rate-limit.guard';
+import { HealthService } from './health.service';
+import { ObservabilityService } from './observability.service';
 
 @Module({
   imports: [
@@ -72,6 +74,8 @@ import { CheckoutRateLimitGuard } from './common/guards/checkout-rate-limit.guar
     StripeService,
     CheckoutRateLimitService,
     CheckoutRateLimitGuard,
+    HealthService,
+    ObservabilityService,
   ],
 })
 export class AppModule {}
