@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Avatar from '@mui/material/Avatar';
 import AvatarGroup from '@mui/material/AvatarGroup';
 import Dialog from '@mui/material/Dialog';
@@ -17,6 +17,7 @@ import CircularProgress from '@mui/material/CircularProgress';
 import Link from 'next/link';
 import { format } from 'date-fns';
 import { api } from '@/lib/api';
+import { startCheckout } from '@/lib/checkout';
 import { formatCost, fullName, locationLabel } from '@/lib/format';
 import type { YogaClass } from '@/lib/types';
 
@@ -40,6 +41,18 @@ export default function ClassModal({
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [message, setMessage] = useState('');
 
+  // Checkout leaves this page in its loading state; when the browser restores
+  // it from the back/forward cache, let the member try again.
+  useEffect(() => {
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) {
+        setStatus((current) => (current === 'loading' ? 'idle' : current));
+      }
+    };
+    window.addEventListener('pageshow', onPageShow);
+    return () => window.removeEventListener('pageshow', onPageShow);
+  }, []);
+
   const registered = isRegistered;
   const currentStatus =
     registrationStatus ?? (registered ? 'Registered' : null);
@@ -55,6 +68,10 @@ export default function ClassModal({
     if (!currentUserId) return;
     setStatus('loading');
     try {
+      if (Number(cls.cost) > 0) {
+        await startCheckout(cls.id);
+        return;
+      }
       const registration = await api<{ status: string }>(
         `/api/registration/class/${cls.id}/user/${currentUserId}`,
         {

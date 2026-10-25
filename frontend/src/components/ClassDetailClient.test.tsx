@@ -1,10 +1,26 @@
-import { screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from './test-utils';
 import ClassDetailClient from './ClassDetailClient';
 import { yogaClass } from './test-fixtures';
 import type { AuthUser } from '@/lib/types';
+import { startCheckout } from '@/lib/checkout';
+
+vi.mock('@/lib/checkout', () => ({ startCheckout: vi.fn() }));
+
+const freeYogaClass = { ...yogaClass, cost: '0' };
+
+/** Simulates the browser showing this page again (from bfcache if persisted). */
+function pageShow(persisted: boolean) {
+  act(() => {
+    window.dispatchEvent(
+      Object.assign(new Event('pageshow'), {
+        persisted,
+      }) as PageTransitionEvent,
+    );
+  });
+}
 
 const user: AuthUser = {
   id: 'user-1',
@@ -18,8 +34,74 @@ const user: AuthUser = {
 afterEach(() => vi.restoreAllMocks());
 
 describe('ClassDetailClient', () => {
+  describe('paid classes', () => {
+    const member = { ...user, yogaExperience: 'Beginner' };
+
+    function notRegisteredYet() {
+      return vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(
+          new Response('{}', { status: 404, statusText: 'Not found' }),
+        );
+    }
+
+    it('sends members to Stripe Checkout instead of registering', async () => {
+      const testUser = userEvent.setup();
+      const fetchMock = notRegisteredYet();
+      vi.mocked(startCheckout).mockResolvedValue(undefined);
+      render(<ClassDetailClient cls={yogaClass} user={member} />);
+
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Register' })).toBeEnabled(),
+      );
+      await testUser.click(screen.getByRole('button', { name: 'Register' }));
+
+      expect(startCheckout).toHaveBeenCalledWith(1);
+      expect(fetchMock).not.toHaveBeenCalledWith(
+        expect.stringContaining('/api/registration/class/1/user/'),
+        expect.anything(),
+      );
+    });
+
+    it.each([
+      [new Error('Class is full'), 'Class is full'],
+      [new Error(''), 'Registration failed.'],
+    ])('shows why checkout could not start: %s', async (error, message) => {
+      const testUser = userEvent.setup();
+      notRegisteredYet();
+      vi.mocked(startCheckout).mockRejectedValue(error);
+      render(<ClassDetailClient cls={yogaClass} user={member} />);
+
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Register' })).toBeEnabled(),
+      );
+      await testUser.click(screen.getByRole('button', { name: 'Register' }));
+
+      expect(await screen.findByText(message)).toBeInTheDocument();
+    });
+
+    it('lets the member retry after returning from Checkout via Back', async () => {
+      const testUser = userEvent.setup();
+      notRegisteredYet();
+      vi.mocked(startCheckout).mockReturnValue(new Promise(() => undefined));
+      render(<ClassDetailClient cls={yogaClass} user={member} />);
+
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Register' })).toBeEnabled(),
+      );
+      await testUser.click(screen.getByRole('button', { name: 'Register' }));
+      expect(screen.queryByRole('button', { name: 'Register' })).toBeNull();
+
+      pageShow(false);
+      expect(screen.queryByRole('button', { name: 'Register' })).toBeNull();
+
+      pageShow(true);
+      expect(screen.getByRole('button', { name: 'Register' })).toBeEnabled();
+    });
+  });
+
   it('offers sign-in when there is no user', () => {
-    render(<ClassDetailClient cls={yogaClass} />);
+    render(<ClassDetailClient cls={freeYogaClass} />);
     expect(
       screen.getByRole('link', { name: 'Sign in to register' }),
     ).toHaveAttribute('href', '/login');
@@ -37,7 +119,10 @@ describe('ClassDetailClient', () => {
         return new Response(JSON.stringify({ id: 1 }), { status: 200 });
       });
     render(
-      <ClassDetailClient cls={{ ...yogaClass, isPrivate: true }} user={user} />,
+      <ClassDetailClient
+        cls={{ ...freeYogaClass, isPrivate: true }}
+        user={user}
+      />,
     );
 
     await waitFor(() =>
@@ -88,7 +173,7 @@ describe('ClassDetailClient', () => {
     });
     render(
       <ClassDetailClient
-        cls={yogaClass}
+        cls={freeYogaClass}
         user={{ ...user, yogaExperience: 'Beginner' }}
       />,
     );
