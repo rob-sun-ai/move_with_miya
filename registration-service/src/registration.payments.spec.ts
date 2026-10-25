@@ -183,6 +183,39 @@ describe('RegistrationService payments', () => {
       expect(prisma.payment.create).not.toHaveBeenCalled();
     });
 
+    it('caps the classes one member can hold checkouts in', async () => {
+      prisma.payment.findFirst.mockResolvedValue(null);
+      prisma.payment.count.mockResolvedValueOnce(3);
+
+      await expect(
+        service.createOrGetPendingPayment(input),
+      ).rejects.toMatchObject({
+        error: { statusCode: 409 },
+        message: expect.stringContaining(
+          'too many checkouts in progress',
+        ) as unknown,
+      });
+      expect(prisma.payment.count).toHaveBeenCalledWith({
+        where: {
+          userId: 'user-1',
+          classId: { not: 10 },
+          status: 'Pending',
+          expiresAt: { gt: expect.any(Date) as unknown },
+        },
+      });
+      expect(prisma.payment.create).not.toHaveBeenCalled();
+    });
+
+    it('lets a member under the cap start another checkout', async () => {
+      prisma.payment.findFirst.mockResolvedValue(null);
+      prisma.payment.count.mockResolvedValueOnce(2).mockResolvedValue(0);
+      prisma.payment.create.mockResolvedValue({ id: 'payment-2' });
+
+      await expect(service.createOrGetPendingPayment(input)).resolves.toEqual({
+        id: 'payment-2',
+      });
+    });
+
     it('creates a pending payment inside a serializable transaction', async () => {
       prisma.payment.findFirst.mockResolvedValue(null);
       prisma.registration.count.mockResolvedValue(4);

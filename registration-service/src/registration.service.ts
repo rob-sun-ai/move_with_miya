@@ -103,6 +103,14 @@ function refundRequest(amountCents: number, percentage: number) {
 const SERIALIZABLE_MAX_ATTEMPTS = 5;
 
 /**
+ * Classes one member may hold a seat in through unfinished checkouts. Each
+ * hold lasts as long as its Checkout session, so without a cap one account
+ * could tie up seats across the schedule at whatever pace the rate limits
+ * allow.
+ */
+const MAX_HELD_CHECKOUTS_PER_MEMBER = 3;
+
+/**
  * Whether a serializable transaction lost a race and can simply be rerun.
  * Prisma reports a conflict detected mid-transaction as P2034, but the pg
  * driver adapter surfaces one detected at COMMIT as a raw 40001 error. A
@@ -261,6 +269,21 @@ export class RegistrationService {
           where: { id: existing.id },
           data: { status: 'Expired' },
         });
+      }
+
+      const held = await tx.payment.count({
+        where: {
+          userId: data.userId,
+          classId: { not: data.classId },
+          status: 'Pending',
+          expiresAt: { gt: new Date() },
+        },
+      });
+      if (held >= MAX_HELD_CHECKOUTS_PER_MEMBER) {
+        throw new RpcError(
+          409,
+          'You have too many checkouts in progress. Finish one, or try again once they expire in about 30 minutes.',
+        );
       }
 
       const [registered, pending] = await Promise.all([
