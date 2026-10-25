@@ -61,6 +61,38 @@ jobs:
       - run: npm run build --prefix registration-service
       - run: npm run build --prefix frontend
 
+  migrations:
+    needs: install
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/node-deps
+      # Applies every migration to an empty database, then fails if the
+      # Prisma schema (including partial indexes) differs from the result.
+      - name: Apply migrations and check for schema drift
+        run: |
+          for service in user-service classes-service registration-service; do
+            export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/${service//-/_}"
+            (cd "$service" \
+              && npx prisma migrate deploy \
+              && npx prisma migrate diff --from-config-datasource \
+                --to-schema prisma/schema.prisma --exit-code)
+          done
+
   test:
     needs: install
     runs-on: ubuntu-latest
