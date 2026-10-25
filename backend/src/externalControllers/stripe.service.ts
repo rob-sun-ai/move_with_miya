@@ -50,6 +50,19 @@ const UNSUPPORTED_CURRENCIES = new Set([
   'xpf',
 ]);
 
+/**
+ * Whether Stripe rejected a request because another request with the same
+ * idempotency key is in flight or has already used it. That request owns the
+ * result, so this one must not record a failure.
+ */
+function isIdempotencyConflict(error: unknown) {
+  const { type, statusCode } = (error ?? {}) as {
+    type?: string;
+    statusCode?: number;
+  };
+  return type === 'StripeIdempotencyError' || statusCode === 409;
+}
+
 interface ClassRecord {
   id: number;
   name: string;
@@ -368,14 +381,7 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
     session: Stripe.Checkout.Session | undefined,
     error: unknown,
   ) {
-    const stripeError = (error ?? {}) as { type?: string; statusCode?: number };
-    if (
-      !session &&
-      (stripeError.type === 'StripeIdempotencyError' ||
-        stripeError.statusCode === 409)
-    ) {
-      return true;
-    }
+    if (!session && isIdempotencyConflict(error)) return true;
     const current = await this.rpc<PaymentRecord | null>('get_payment_by_id', {
       id: paymentId,
     }).catch(() => null);
@@ -639,6 +645,14 @@ export class StripeService implements OnModuleInit, OnModuleDestroy {
         refundAmountCents,
       );
     } catch (error) {
+      // A concurrent attempt (an admin double-click, or the retry sweep
+      // racing a cancellation) is creating this refund under the same key.
+      // Failing it here would mark a refund that is going through as failed.
+      if (isIdempotencyConflict(error)) {
+        throw new ConflictException(
+          'This refund is already being issued; check again shortly',
+        );
+      }
       await this.rpc('fail_payment_refund', {
         paymentId,
         error: error instanceof Error ? error.message : 'Refund failed',

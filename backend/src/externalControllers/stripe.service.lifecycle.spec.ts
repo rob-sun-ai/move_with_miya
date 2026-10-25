@@ -1527,6 +1527,59 @@ describe('StripeService lifecycle', () => {
       ]);
     });
 
+    it.each([
+      [
+        'an in-flight request',
+        { type: 'StripeIdempotencyError', statusCode: 409 },
+      ],
+      ['a conflicting request', { statusCode: 409 }],
+      ['a reused key', { type: 'StripeIdempotencyError', statusCode: 400 }],
+    ])(
+      'does not fail a refund Stripe reports %s for',
+      async (_label, error) => {
+        const ctx = setup();
+        ctx.replies.get_payment_by_id = pending;
+        ctx.stripe.refunds.create.mockRejectedValue(error);
+
+        await expect(ctx.service.refundPayment('payment-1')).rejects.toEqual(
+          new ConflictException(
+            'This refund is already being issued; check again shortly',
+          ),
+        );
+        expect(ctx.sent('fail_payment_refund')).toEqual([]);
+      },
+    );
+
+    it('lets the attempt that owns the key record a concurrent refund', async () => {
+      const ctx = setup();
+      ctx.replies.get_payment_by_id = pending;
+      let finishFirst: (refund: unknown) => void = () => undefined;
+      ctx.stripe.refunds.create
+        .mockImplementationOnce(
+          () => new Promise((resolve) => (finishFirst = resolve)),
+        )
+        .mockRejectedValueOnce({
+          type: 'StripeIdempotencyError',
+          statusCode: 409,
+        });
+
+      const first = ctx.service.refundPayment('payment-1');
+      await jest.advanceTimersByTimeAsync(0);
+      const second = ctx.service.refundPayment('payment-1');
+
+      await expect(second).rejects.toBeInstanceOf(ConflictException);
+      finishFirst({ id: 're_1', amount: 1550, status: 'succeeded' });
+      await first;
+
+      const [[, firstKey], [, secondKey]] = ctx.stripe.refunds.create.mock
+        .calls as [unknown, unknown][];
+      expect(secondKey).toEqual(firstKey);
+      expect(ctx.sent('fail_payment_refund')).toEqual([]);
+      expect(ctx.sent('complete_payment_refund')).toEqual([
+        { paymentId: 'payment-1', stripeRefundId: 're_1', amountCents: 1550 },
+      ]);
+    });
+
     it('still reports the Stripe failure when recording it fails', async () => {
       const ctx = setup();
       ctx.replies.get_payment_by_id = pending;
