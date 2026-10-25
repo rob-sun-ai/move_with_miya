@@ -147,12 +147,20 @@ jobs:
       TLS_KEY_FILE: /tmp/privkey.pem
       RELEASE_VERSION: ci
       GRAFANA_ADMIN_PASSWORD: ci-grafana-password-0123456789
+      ALERT_EMAIL_TO: alerts@example.test
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Validate production Compose interpolation
         run: docker compose -f docker-compose.prod.yml config --quiet
+      - name: Test alert rules
+        run: |
+          docker run --rm --entrypoint sh \
+            -v "$PWD/ops/observability:/cfg:ro" -w /cfg prom/prometheus:v3.5.0 \
+            -c 'promtool check rules alerts.yml && promtool test rules alerts.test.yml'
+      - name: Test the Alertmanager service
+        run: ./ops/observability/test-alertmanager.sh
       - name: Validate nginx configuration
         run: |
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 \

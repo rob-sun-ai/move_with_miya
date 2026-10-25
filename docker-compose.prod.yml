@@ -337,6 +337,28 @@ services:
     volumes:
       - prometheus-data:/prometheus
       - ./ops/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro,z
+      - ./ops/observability/alerts.yml:/etc/prometheus/alerts.yml:ro,z
+    logging: *logging
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    restart: unless-stopped
+    # Alertmanager cannot read the environment, so the entrypoint renders the
+    # recipients into its config before starting it.
+    entrypoint: ['/bin/sh', '/etc/alertmanager/alertmanager-entrypoint.sh']
+    # Links in alert emails point here; reach it through an SSH tunnel.
+    command:
+      ['--web.external-url=${ALERTMANAGER_EXTERNAL_URL:-http://localhost:9093}']
+    environment:
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:?ALERT_EMAIL_TO is required}
+      ALERT_EMAIL_FROM: ${RESEND_FROM_EMAIL:?RESEND_FROM_EMAIL is required}
+      ALERT_HEARTBEAT_URL: ${ALERT_HEARTBEAT_URL:-}
+    secrets:
+      - resend_api_key
+    volumes:
+      - ./ops/observability/alertmanager.yml.tmpl:/etc/alertmanager/alertmanager.yml.tmpl:ro,z
+      - ./ops/observability/alertmanager-entrypoint.sh:/etc/alertmanager/alertmanager-entrypoint.sh:ro,z
+      - alertmanager-data:/alertmanager
     logging: *logging
 
   loki:
@@ -390,6 +412,11 @@ volumes:
   postgres-data:
   prometheus-data:
   grafana-data:
+  alertmanager-data:
   loki-data:
   tempo-data:
   promtail-data:
+
+secrets:
+  resend_api_key:
+    environment: RESEND_API_KEY
