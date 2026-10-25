@@ -50,6 +50,13 @@ export class UsersService {
     });
   }
 
+  async linkGoogleAccount(id: string, googleId: string): Promise<User> {
+    return this.prisma.client.user.update({
+      where: { id },
+      data: { googleId, lastLoginAt: new Date() },
+    });
+  }
+
   async remove(id: string): Promise<void> {
     await this.findById(id);
     await this.prisma.client.user.delete({ where: { id } });

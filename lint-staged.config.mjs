@@ -19,4 +19,6 @@ export default {
     'prettier --write --log-level=error',
     'eslint --fix --config registration-service/eslint.config.mjs',
   ],
+  // CI checks Prettier on every file, including workflows and Compose files.
+  '*.{json,yml,yaml}': 'prettier --write --log-level=error',
 };

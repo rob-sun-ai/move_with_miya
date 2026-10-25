@@ -154,6 +154,27 @@ describe('ClassesService date validation', () => {
     });
   });
 
+  it.each([
+    ['from', undefined, '2026-09-30T23:59:59.000Z', 'from is required'],
+    [
+      'to',
+      '2026-09-01T00:00:00.000Z',
+      'next week',
+      'to must be an ISO 8601 date-time with a timezone',
+    ],
+  ])('rejects a range with an invalid %s', (_field, from, to, message) => {
+    expect(() => service.findClassesInRange(from, to)).toThrow(message);
+    expect(prisma.yogaClass.findMany).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, '1; DROP', 0, 1.5])('rejects the class id %p', (id) => {
+    expect(() => service.findClass(id)).toThrow(BadRequestException);
+    expect(() => service.deleteClass(id)).toThrow(BadRequestException);
+    expect(() => service.updateClass(id, { name: 'x' })).toThrow(
+      BadRequestException,
+    );
+  });
+
   it('loads and deletes a class by id', async () => {
     prisma.yogaClass.findUnique.mockResolvedValue({ id: 1 });
     prisma.yogaClass.delete.mockResolvedValue({ id: 1 });

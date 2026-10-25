@@ -1,13 +1,10 @@
 import {
-  BadRequestException,
   Body,
-  ConflictException,
   Controller,
   ForbiddenException,
   Delete,
   Get,
   Inject,
-  InternalServerErrorException,
   NotFoundException,
   Param,
   ParseIntPipe,
@@ -23,6 +20,8 @@ import { ClientProxy } from '@nestjs/microservices';
 import { lastValueFrom } from 'rxjs';
 import { AdminGuard } from '../common/guards/admin.guard';
 import { StaffGuard } from '../common/guards/staff.guard';
+import { sendRpc } from '../common/rpc';
+import { UpdateRegistrationDto } from './dto/update-registration.dto';
 
 interface Registration {
   id: number;
@@ -55,28 +54,22 @@ export class RegistrationController {
     private readonly classesClient: ClientProxy,
   ) {}
 
-  private async rpc<T = unknown>(cmd: string, payload: object) {
-    try {
-      return await lastValueFrom<T>(
-        this.registrationClient.send<T>({ cmd }, payload),
-      );
-    } catch (error) {
-      const data = (error ?? {}) as {
-        statusCode?: number;
-        message?: string;
-      };
-      const status = data.statusCode;
-      const message = data.message ?? 'Registration service error';
-      if (status === 409) throw new ConflictException(message);
-      if (status === 404) throw new NotFoundException(message);
-      if (status === 400) throw new BadRequestException(message);
-      if (status === 403) throw new ForbiddenException(message);
-      throw new InternalServerErrorException(message);
-    }
+  private rpc<T = unknown>(cmd: string, payload: object) {
+    return sendRpc<T>(
+      this.registrationClient,
+      cmd,
+      payload,
+      'Registration service unavailable',
+    );
   }
 
-  private async rpcClasses<T = unknown>(cmd: string, payload: object) {
-    return lastValueFrom<T>(this.classesClient.send<T>({ cmd }, payload));
+  private rpcClasses<T = unknown>(cmd: string, payload: object) {
+    return sendRpc<T>(
+      this.classesClient,
+      cmd,
+      payload,
+      'Class service unavailable',
+    );
   }
 
   private async getClass(classId: number) {
@@ -96,12 +89,17 @@ export class RegistrationController {
     }
   }
 
+  /**
+   * Attaches `class` (and, for staff views, `user`) to each registration.
+   * Both are best effort and fall back to null.
+   */
   private async enrichRegistrations(
     registrations: Registration[],
+    { withUsers = true } = {},
   ): Promise<Registration[]> {
-    const userIds = [
-      ...new Set(registrations.map((r) => r.userId).filter(Boolean)),
-    ];
+    const userIds = withUsers
+      ? [...new Set(registrations.map((r) => r.userId).filter(Boolean))]
+      : [];
     const userServiceUrl =
       process.env.USER_SERVICE_URL || 'http://localhost:3003';
 
@@ -125,7 +123,7 @@ export class RegistrationController {
     const classMap = new Map(classes.map((cls) => [cls.id, cls]));
     return registrations.map((registration) => ({
       ...registration,
-      user: userMap.get(registration.userId) ?? null,
+      ...(withUsers && { user: userMap.get(registration.userId) ?? null }),
       class: classMap.get(registration.classId) ?? null,
     }));
   }
@@ -155,7 +153,13 @@ export class RegistrationController {
     if (!userId) {
       throw new UnauthorizedException('Not authenticated');
     }
-    return this.rpc<Registration[]>('get_registrations_by_user', { userId });
+    const registrations = await this.rpc<Registration[]>(
+      'get_registrations_by_user',
+      { userId },
+    );
+    // Members see their own registrations with class details, but no
+    // user profiles.
+    return this.enrichRegistrations(registrations, { withUsers: false });
   }
 
   @UseGuards(AdminGuard)
@@ -317,9 +321,9 @@ export class RegistrationController {
   @Patch(':id')
   updateRegistration(
     @Param('id', ParseIntPipe) id: number,
-    @Body() body: Record<string, unknown>,
+    @Body() body: UpdateRegistrationDto,
   ) {
-    return this.rpc<Registration>('update_registration', { id, ...body });
+    return this.rpc<Registration>('update_registration', { ...body, id });
   }
 
   @UseGuards(AdminGuard)

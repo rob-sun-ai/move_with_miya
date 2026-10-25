@@ -8,22 +8,20 @@ A microservices-based yoga studio management platform.
 |---|---|---|---|
 | `frontend` | Next.js | 5173 | Client app |
 | `backend` | NestJS | 3002 | API gateway |
-| `user-service` | Express | 3003 | Auth & user management |
-| `classes-service` | Express | — | Class scheduling (event-driven) |
-| `registration-service` | Express | — | Class registrations (event-driven) |
-| `nginx` | nginx | 80 | Reverse proxy |
-| `postgres` | PostgreSQL 16 | 5432 | Databases: `miya_users`, `miya_classes`, `miya_registrations` |
+| `user-service` | NestJS | 3003 | Auth & user management |
+| `classes-service` | NestJS | — | Class scheduling (event-driven) |
+| `registration-service` | NestJS | — | Class registrations (event-driven) |
+| `nginx` | nginx | 80 / 443 | Reverse proxy and TLS (production only; in development Next.js proxies `/api/*`) |
+| `postgres` | PostgreSQL 16 | 5433 (host) | Databases: `miya_users`, `miya_classes`, `miya_registrations` |
 | `redis` | Redis 7 | 6379 | Session store |
 | `rabbitmq` | RabbitMQ | 5672 / 15672 | Message broker |
 
 ```text
-Frontend (port 5173)
-  │
-  └── /api/*       →  backend:3002
-  └── /api/auth/*  →  (nginx →) user-service:3003
-                          │
-                          ├── classes-service (RabbitMQ)
-                          └── registration-service (RabbitMQ)
+Browser → frontend (Next.js dev server; nginx in production)
+  ├── /api/auth/*, /api/users/*  →  user-service:3003
+  └── /api/*                     →  backend:3002
+                                      ├── classes-service (RabbitMQ)
+                                      └── registration-service (RabbitMQ)
 ```
 
 ## Prerequisites
@@ -79,14 +77,16 @@ This starts Redis, Postgres, and RabbitMQ.
 npm install
 ```
 
-This installs root deps (concurrently, eslint, etc.) and runs `postinstall` to install all sub-service deps. It also generates the Prisma client for `user-service` (outputs to `user-service/src/generated/prisma`).
+This installs root deps (concurrently, eslint, etc.) and runs `postinstall` to install all sub-service deps. It also generates the Prisma client for `user-service`, `classes-service`, and `registration-service` (each outputs to `<service>/src/generated/prisma`).
 
 ### 3. Generate the Prisma client
 
 This runs automatically during `npm install` (via `postinstall`). If you need to regenerate it manually:
 
 ```bash
-cd user-service && npx prisma generate
+for service in user-service classes-service registration-service; do
+  (cd "$service" && npx prisma generate)
+done
 ```
 
 ### 4. Run database setup
@@ -126,7 +126,7 @@ cd registration-service && npm run start:dev
 cd frontend             && npm run dev        # port 5173
 ```
 
-### 5. Open the app
+### 6. Open the app
 
 Navigate to `http://localhost:5173`.
 
@@ -135,7 +135,7 @@ Navigate to `http://localhost:5173`.
 ```bash
 npm run lint          # Lint all services
 npm run typecheck     # Type-check all services
-npm run test          # Run backend tests
+npm run test          # Run unit tests in every service
 npm run audit:fix     # npm audit fix across all services
 ```
 

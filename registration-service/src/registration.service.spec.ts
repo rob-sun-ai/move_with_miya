@@ -30,6 +30,10 @@ describe('RegistrationService', () => {
     outboxEvent: {
       create: jest.Mock;
     };
+    notificationDelivery: {
+      updateMany: jest.Mock;
+      create: jest.Mock;
+    };
   };
 
   const existing = {
@@ -59,6 +63,10 @@ describe('RegistrationService', () => {
       },
       outboxEvent: {
         create: jest.fn().mockResolvedValue({}),
+      },
+      notificationDelivery: {
+        updateMany: jest.fn(),
+        create: jest.fn(),
       },
       $transaction: jest.fn((callback: (tx: typeof prisma) => unknown) =>
         callback(prisma),
@@ -252,7 +260,47 @@ describe('RegistrationService', () => {
     await expect(service.createRegistration(10, 'user-2', 10)).rejects.toEqual(
       conflict,
     );
-    expect(prisma.$transaction).toHaveBeenCalledTimes(3);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(5);
+  });
+
+  it('retries a conflict the pg adapter reports at commit', async () => {
+    // Shape of the DriverAdapterError thrown when COMMIT fails with 40001.
+    const commitConflict = Object.assign(
+      new Error('TransactionWriteConflict'),
+      {
+        cause: { originalCode: '40001', kind: 'TransactionWriteConflict' },
+      },
+    );
+    prisma.$transaction.mockRejectedValueOnce(commitConflict);
+    prisma.registration.findFirst.mockResolvedValue(null);
+    prisma.registration.count.mockResolvedValue(0);
+    prisma.registration.create.mockResolvedValue(existing);
+
+    await expect(service.createRegistration(10, 'user-2', 10)).resolves.toEqual(
+      existing,
+    );
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries a transaction Postgres aborted to break a deadlock', async () => {
+    // Shape of the error Prisma throws for 40P01 through the pg adapter.
+    const deadlock = {
+      code: 'P2039',
+      meta: {
+        driverAdapterError: {
+          cause: { originalCode: '40P01', kind: 'postgres' },
+        },
+      },
+    };
+    prisma.$transaction.mockRejectedValueOnce(deadlock);
+    prisma.registration.findFirst.mockResolvedValue(null);
+    prisma.registration.count.mockResolvedValue(0);
+    prisma.registration.create.mockResolvedValue(existing);
+
+    await expect(service.createRegistration(10, 'user-2', 10)).resolves.toEqual(
+      existing,
+    );
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
   });
 
   it('rejects duplicate registration with 409', async () => {
@@ -355,20 +403,168 @@ describe('RegistrationService', () => {
     expect(prisma.registration.update).not.toHaveBeenCalled();
   });
 
-  it('updates registrations and rejects destructive deletion', async () => {
-    prisma.registration.update.mockResolvedValue({
-      ...existing,
-      status: 'Canceled',
-    });
-
-    expect(() => service.updateRegistration(1, { status: 'Canceled' })).toThrow(
-      'Use the cancellation lifecycle endpoint to change status',
-    );
+  it('rejects destructive deletion', async () => {
     await expect(service.deleteRegistration(1)).rejects.toMatchObject({
       message: 'Registration 1 must be canceled, not deleted',
     });
     await expect(service.deleteClassRegistrations(10)).rejects.toMatchObject({
       message: 'Class 10 registrations must be canceled, not deleted',
+    });
+    await expect(
+      service.deleteRegistrationByClassAndUser(),
+    ).rejects.toMatchObject({
+      message: 'Registrations must be canceled, not deleted',
+    });
+    expect(prisma.registration.update).not.toHaveBeenCalled();
+  });
+
+  describe('updateRegistration', () => {
+    it('edits the cancellation reason', async () => {
+      prisma.registration.update.mockResolvedValue(existing);
+
+      await expect(
+        service.updateRegistration(1, { cancellationReason: 'Injury' }),
+      ).resolves.toEqual(existing);
+      expect(prisma.registration.update).toHaveBeenCalledWith({
+        where: { id: 1 },
+        data: { cancellationReason: 'Injury' },
+      });
+    });
+
+    it('routes status changes to the lifecycle endpoints', async () => {
+      await expect(
+        service.updateRegistration(1, { status: 'Canceled' }),
+      ).rejects.toMatchObject({
+        message: 'Use the cancellation lifecycle endpoint to change status',
+      });
+    });
+
+    it.each([
+      { classId: 11 },
+      { userId: 'user-2' },
+      { registeredAt: '2000-01-01' },
+      { id: 2 },
+      { cancellationReason: 42 },
+    ])('rejects lifecycle-owned or invalid field %o', async (data) => {
+      await expect(service.updateRegistration(1, data)).rejects.toMatchObject({
+        message: 'Only the cancellation reason can be edited',
+      });
+      expect(prisma.registration.update).not.toHaveBeenCalled();
+    });
+
+    it('maps a missing registration to not found', async () => {
+      prisma.registration.update.mockRejectedValue({ code: 'P2025' });
+
+      await expect(
+        service.updateRegistration(9, { cancellationReason: null }),
+      ).rejects.toMatchObject({ message: 'Registration 9 not found' });
+    });
+  });
+
+  describe('payload validation', () => {
+    // Prisma drops undefined filters, so each of these would otherwise
+    // read or change registrations of every class or member.
+    it.each([
+      [
+        'cancelClassRegistrations',
+        () => service.cancelClassRegistrations(undefined as never),
+      ],
+      [
+        'cancelRegistrationByClassAndUser',
+        () =>
+          service.cancelRegistrationByClassAndUser(10, undefined as never, {
+            capacity: 10,
+          }),
+      ],
+      [
+        'findRegistrationByClassAndUser',
+        () => service.findRegistrationByClassAndUser(10, undefined as never),
+      ],
+      [
+        'findRegistrations',
+        () => service.findRegistrations(undefined as never),
+      ],
+      [
+        'findRegistrationsByUser',
+        () => service.findRegistrationsByUser(undefined as never),
+      ],
+      [
+        'promoteWaitlisted',
+        () => service.promoteWaitlisted(undefined as never, 10),
+      ],
+      [
+        'getRegistrationCounts',
+        () => service.getRegistrationCounts([10, '11' as never]),
+      ],
+      [
+        'createRegistration',
+        () => service.createRegistration(10, undefined as never, 10),
+      ],
+      [
+        'getClassLifecycleSummary',
+        () => service.getClassLifecycleSummary(undefined as never),
+      ],
+    ])('%s rejects a missing id before querying', async (_label, call) => {
+      await expect((call as () => Promise<unknown>)()).rejects.toMatchObject({
+        error: { statusCode: 400 },
+      });
+      expect(prisma.registration.findMany).not.toHaveBeenCalled();
+      expect(prisma.registration.findFirst).not.toHaveBeenCalled();
+      expect(prisma.registration.count).not.toHaveBeenCalled();
+      expect(prisma.registration.groupBy).not.toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('claimNotification', () => {
+    it('takes over a pending or stale delivery atomically', async () => {
+      prisma.notificationDelivery.updateMany.mockResolvedValue({ count: 1 });
+
+      await expect(service.claimNotification('event-1')).resolves.toBe(true);
+      expect(prisma.notificationDelivery.updateMany).toHaveBeenCalledWith({
+        where: {
+          eventKey: 'event-1',
+          OR: [
+            { status: 'Pending' },
+            {
+              status: 'Processing',
+              updatedAt: { lt: expect.any(Date) as unknown },
+            },
+          ],
+        },
+        data: { status: 'Processing' },
+      });
+      expect(prisma.notificationDelivery.create).not.toHaveBeenCalled();
+    });
+
+    it('creates the delivery for a new event', async () => {
+      prisma.notificationDelivery.updateMany.mockResolvedValue({ count: 0 });
+      prisma.notificationDelivery.create.mockResolvedValue({});
+
+      await expect(service.claimNotification('event-1')).resolves.toBe(true);
+      expect(prisma.notificationDelivery.create).toHaveBeenCalledWith({
+        data: { eventKey: 'event-1', status: 'Processing' },
+      });
+    });
+
+    it('does not claim a delivery that is sent or held by another consumer', async () => {
+      prisma.notificationDelivery.updateMany.mockResolvedValue({ count: 0 });
+      prisma.notificationDelivery.create.mockRejectedValue({ code: 'P2002' });
+
+      await expect(service.claimNotification('event-1')).resolves.toBe(false);
+    });
+
+    it('rethrows unexpected database errors', async () => {
+      prisma.notificationDelivery.updateMany.mockResolvedValue({ count: 0 });
+      prisma.notificationDelivery.create.mockRejectedValue(new Error('db'));
+
+      await expect(service.claimNotification('event-1')).rejects.toThrow('db');
+    });
+
+    it('requires an event key', async () => {
+      await expect(service.claimNotification(' ')).rejects.toMatchObject({
+        message: 'Notification event key is required',
+      });
     });
   });
 
@@ -422,15 +618,43 @@ describe('RegistrationService', () => {
     prisma.contactSubmission.create.mockResolvedValue(contact);
     prisma.contactSubmission.findMany.mockResolvedValue([contact]);
 
-    await expect(service.createContactSubmission(contact)).resolves.toEqual(
-      contact,
-    );
+    await expect(
+      service.createContactSubmission({ ...contact, read: true } as never),
+    ).resolves.toEqual(contact);
+    expect(prisma.contactSubmission.create).toHaveBeenCalledWith({
+      data: {
+        name: 'Person',
+        email: 'person@example.com',
+        subject: 'Question',
+        message: 'Hello',
+      },
+    });
     await expect(service.getContactSubmissions()).resolves.toEqual([contact]);
     expect(prisma.contactSubmission.findMany).toHaveBeenCalledWith({
       take: 50,
       skip: 0,
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     });
+  });
+
+  it.each([
+    [0, 0],
+    [101, 0],
+    [null, 0],
+    [10, -1],
+    [10, 1.5],
+  ])('rejects contact page take=%p skip=%p', async (take, skip) => {
+    await expect(
+      service.getContactSubmissions(take as never, skip),
+    ).rejects.toMatchObject({ message: 'Contact submission page is invalid' });
+    expect(prisma.contactSubmission.findMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-boolean read status', async () => {
+    await expect(
+      service.markContactSubmissionRead(7, 'yes' as never),
+    ).rejects.toMatchObject({ message: 'Read status is invalid' });
+    expect(prisma.contactSubmission.update).not.toHaveBeenCalled();
   });
 
   it('updates contact read status', async () => {

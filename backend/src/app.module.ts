@@ -29,7 +29,7 @@ import { RegistrationNotificationService } from './externalControllers/registrat
         name: 'CLASSES_SERVICE',
         transport: Transport.RMQ,
         options: {
-          urls: [process.env.RABBITMQ_URL ?? 'amqp://localhost:5672'],
+          urls: [process.env.RABBITMQ_URL || 'amqp://localhost:5672'],
           queue: 'classes_queue',
           queueOptions: { durable: true },
         },
@@ -38,7 +38,7 @@ import { RegistrationNotificationService } from './externalControllers/registrat
         name: 'REGISTRATION_SERVICE',
         transport: Transport.RMQ,
         options: {
-          urls: [process.env.RABBITMQ_URL ?? 'amqp://localhost:5672'],
+          urls: [process.env.RABBITMQ_URL || 'amqp://localhost:5672'],
           queue: 'registration_queue',
           queueOptions: { durable: true },
         },

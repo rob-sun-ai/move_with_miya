@@ -1,4 +1,8 @@
-import { ForbiddenException, UnauthorizedException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
 jest.mock('../../prisma/prisma.service', () => ({ PrismaService: class {} }));
 jest.mock('../../generated/prisma/client', () => ({
   UserRole: { ADMIN: 'ADMIN' },
@@ -19,6 +23,15 @@ describe('UserService AdminGuard', () => {
     await expect(guard.canActivate(context())).rejects.toThrow(
       UnauthorizedException,
     );
+  });
+
+  it('treats a session whose account was deleted as unauthenticated', async () => {
+    const usersService = {
+      findById: jest.fn().mockRejectedValue(new NotFoundException()),
+    };
+    await expect(
+      new AdminGuard(usersService as never).canActivate(context('gone')),
+    ).rejects.toThrow(UnauthorizedException);
   });
 
   it('rejects banned and non-admin users', async () => {

@@ -17,6 +17,7 @@ import CircularProgress from '@mui/material/CircularProgress';
 import Link from 'next/link';
 import { format } from 'date-fns';
 import { api } from '@/lib/api';
+import { formatCost, fullName, locationLabel } from '@/lib/format';
 import type { YogaClass } from '@/lib/types';
 
 interface ClassModalProps {
@@ -26,12 +27,6 @@ interface ClassModalProps {
   registrationStatus?: string;
   onClose: () => void;
   onRegisteredChange: (classId: number, status: string) => void;
-}
-
-function formatCost(cost: string): string {
-  const amount = Number(cost);
-  if (Number.isNaN(amount) || amount === 0) return 'Free';
-  return `$${amount.toFixed(2)}`;
 }
 
 export default function ClassModal({
@@ -54,8 +49,7 @@ export default function ClassModal({
   const registrationClosed =
     hasEnded || cls.status === 'Canceled' || cls.status === 'Completed';
 
-  const locationName =
-    cls.location.name ?? `${cls.location.city}, ${cls.location.state}`;
+  const locationName = locationLabel(cls.location);
 
   const handleRegister = async () => {
     if (!currentUserId) return;
@@ -150,14 +144,12 @@ export default function ClassModal({
                     <Avatar
                       key={t.id}
                       src={t.avatarUrl ?? undefined}
-                      alt={`${t.firstName} ${t.lastName}`}
+                      alt={fullName(t)}
                     />
                   ))}
                 </AvatarGroup>
                 <Typography variant="body2" color="text.secondary">
-                  {teachers
-                    .map((t) => `${t.firstName} ${t.lastName}`.trim())
-                    .join(', ')}
+                  {teachers.map(fullName).join(', ')}
                 </Typography>
               </>
             ) : (

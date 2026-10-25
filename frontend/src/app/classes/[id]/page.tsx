@@ -2,12 +2,16 @@ import { cookies } from 'next/headers';
 import { notFound } from 'next/navigation';
 import type { Metadata } from 'next';
 import ClassDetailClient from '@/components/ClassDetailClient';
-import type { AuthUser, Registration, YogaClass } from '@/lib/types';
-import { BACKEND_URL, USER_SERVICE_URL } from '@/lib/env';
+import type { Registration, YogaClass } from '@/lib/types';
+import { BACKEND_URL } from '@/lib/env';
+import { getCurrentUser } from '@/lib/session';
 
 const STAFF_ROLES = ['ADMIN', 'TEACHER'];
 
 async function fetchClass(id: string): Promise<YogaClass | null> {
+  // The id comes straight from the URL; anything but a class id (e.g. an
+  // encoded "../") must not reach the backend as part of the path.
+  if (!/^\d+$/.test(id)) return null;
   try {
     const res = await fetch(`${BACKEND_URL}/classes/${id}`, {
       cache: 'no-store',
@@ -41,44 +45,17 @@ export async function generateMetadata({
   };
 }
 
-interface Registrant extends Registration {
-  user?: {
-    id: string;
-    firstName: string;
-    lastName: string;
-    avatarUrl?: string | null;
-    role: string;
-  } | null;
-}
-
-async function fetchCurrentUser(
-  cookieString: string,
-): Promise<AuthUser | null> {
-  try {
-    if (!cookieString) return null;
-    const res = await fetch(`${USER_SERVICE_URL}/auth/me`, {
-      cache: 'no-store',
-      headers: { cookie: cookieString },
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as AuthUser;
-  } catch (error) {
-    console.error('Failed to load current user:', error);
-    return null;
-  }
-}
-
 async function fetchRegistrants(
   classId: number,
   cookieString: string,
-): Promise<Registrant[] | null> {
+): Promise<Registration[] | null> {
   try {
     const res = await fetch(`${BACKEND_URL}/registration/class/${classId}`, {
       cache: 'no-store',
       headers: { cookie: cookieString },
     });
     if (!res.ok) return null;
-    return (await res.json()) as Registrant[];
+    return (await res.json()) as Registration[];
   } catch (error) {
     console.error('Failed to load registrants:', error);
     return null;
@@ -97,7 +74,7 @@ export default async function ClassDetailPage({
   const cls = await fetchClass(id);
   if (!cls) notFound();
 
-  const user = await fetchCurrentUser(cookieString);
+  const user = await getCurrentUser(cookieString);
   const isStaff = user !== null && STAFF_ROLES.includes(user.role);
   const registrants = isStaff
     ? await fetchRegistrants(cls.id, cookieString)

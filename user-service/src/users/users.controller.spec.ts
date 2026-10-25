@@ -3,6 +3,8 @@ jest.mock('../generated/prisma/client', () => ({
   UserRole: { ADMIN: 'ADMIN', MEMBER: 'MEMBER', TEACHER: 'TEACHER' },
 }));
 
+import { RequestMethod } from '@nestjs/common';
+import { METHOD_METADATA } from '@nestjs/common/constants';
 import { UsersController } from './users.controller';
 
 describe('UsersController', () => {
@@ -23,19 +25,26 @@ describe('UsersController', () => {
     controller = new UsersController(service as never);
   });
 
-  it('delegates user creation and lookup', async () => {
-    service.create.mockResolvedValue('created');
+  it('delegates user lookup', async () => {
     service.findAll.mockResolvedValue(['all']);
     service.findById.mockResolvedValue({ id: 'user-1' });
-    await expect(controller.create({ firstName: 'A' } as never)).resolves.toBe(
-      'created',
-    );
     await expect(controller.findAll()).resolves.toEqual(['all']);
     await expect(controller.findById('user-1')).resolves.toEqual({
       id: 'user-1',
     });
-    expect(service.create).toHaveBeenCalledWith({ firstName: 'A' });
     expect(service.findById).toHaveBeenCalledWith('user-1');
+  });
+
+  it('does not expose a user creation endpoint', () => {
+    const prototype = UsersController.prototype as unknown as Record<
+      string,
+      unknown
+    >;
+    const methods = Object.getOwnPropertyNames(prototype).map((name): unknown =>
+      Reflect.getMetadata(METHOD_METADATA, prototype[name] as object),
+    );
+    expect(methods).toContain(RequestMethod.PATCH);
+    expect(methods).not.toContain(RequestMethod.POST);
   });
 
   it('normalizes and limits batch user responses', async () => {
@@ -59,6 +68,18 @@ describe('UsersController', () => {
       },
     ]);
     expect(service.findByIds).toHaveBeenCalledWith(['user-1', 'user-2']);
+  });
+
+  it('answers a batch request without ids instead of failing', async () => {
+    service.findByIds.mockResolvedValue([]);
+    await expect(controller.findByIds(undefined)).resolves.toEqual([]);
+    expect(service.findByIds).toHaveBeenCalledWith([]);
+  });
+
+  it('looks up each batch id once', async () => {
+    service.findByIds.mockResolvedValue([]);
+    await controller.findByIds('user-1,user-1, user-1');
+    expect(service.findByIds).toHaveBeenCalledWith(['user-1']);
   });
 
   it('delegates profile and admin mutations', async () => {

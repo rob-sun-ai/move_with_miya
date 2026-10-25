@@ -1,8 +1,11 @@
-import { Controller } from '@nestjs/common';
+import { Controller, UseFilters } from '@nestjs/common';
 import { MessagePattern } from '@nestjs/microservices';
 import { LocationService } from './location.service';
+import { asPayload } from '../payload-validation';
+import { RpcErrorFilter } from '../rpc-exception.filter';
 
 @Controller()
+@UseFilters(new RpcErrorFilter())
 export class LocationController {
   constructor(private readonly locationService: LocationService) {}
 
@@ -12,29 +15,23 @@ export class LocationController {
   }
 
   @MessagePattern({ cmd: 'get_location' })
-  findLocation(data: { id: number }) {
-    return this.locationService.findLocation(data.id);
+  findLocation(data: unknown) {
+    return this.locationService.findLocation(asPayload(data).id);
   }
 
   @MessagePattern({ cmd: 'create_location' })
-  createLocation(data: {
-    name?: string;
-    address: string;
-    city: string;
-    state: string;
-    zipCode: string;
-  }) {
-    return this.locationService.createLocation(data);
+  createLocation(data: unknown) {
+    return this.locationService.createLocation(asPayload(data));
   }
 
   @MessagePattern({ cmd: 'update_location' })
-  updateLocation(data: { id: number } & Record<string, unknown>) {
-    const { id, ...rest } = data;
+  updateLocation(data: unknown) {
+    const { id, ...rest } = asPayload(data);
     return this.locationService.updateLocation(id, rest);
   }
 
   @MessagePattern({ cmd: 'delete_location' })
-  deleteLocation(data: { id: number }) {
-    return this.locationService.deleteLocation(data.id);
+  deleteLocation(data: unknown) {
+    return this.locationService.deleteLocation(asPayload(data).id);
   }
 }

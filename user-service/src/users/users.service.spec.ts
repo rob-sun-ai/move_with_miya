@@ -142,6 +142,17 @@ describe('UsersService', () => {
     expect(prisma.user.update).not.toHaveBeenCalled();
   });
 
+  it('links a Google subject and records the login', async () => {
+    prisma.user.update.mockResolvedValue(user);
+
+    await service.linkGoogleAccount('user-1', 'google-2');
+
+    expect(prisma.user.update).toHaveBeenCalledWith({
+      where: { id: 'user-1' },
+      data: { googleId: 'google-2', lastLoginAt: expect.any(Date) as Date },
+    });
+  });
+
   it('deletes an existing user', async () => {
     prisma.user.findUnique.mockResolvedValue(user);
     prisma.user.delete.mockResolvedValue(user);

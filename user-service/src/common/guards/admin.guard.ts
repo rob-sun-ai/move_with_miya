@@ -3,11 +3,11 @@ import {
   CanActivate,
   ExecutionContext,
   ForbiddenException,
-  UnauthorizedException,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { UsersService } from '../../users/users.service';
 import { UserRole } from '../../generated/prisma/client';
+import { loadActiveSessionUser } from '../session-user';
 
 @Injectable()
 export class AdminGuard implements CanActivate {
@@ -15,14 +15,7 @@ export class AdminGuard implements CanActivate {
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<Request>();
-    const userId = request.session?.userId;
-    if (!userId) {
-      throw new UnauthorizedException('Not authenticated');
-    }
-    const user = await this.usersService.findById(userId);
-    if (user.banned) {
-      throw new ForbiddenException('User is banned');
-    }
+    const user = await loadActiveSessionUser(this.usersService, request);
     if (user.role !== UserRole.ADMIN) {
       throw new ForbiddenException('Admin access required');
     }

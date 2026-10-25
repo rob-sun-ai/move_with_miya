@@ -16,7 +16,7 @@ export class RedisService implements OnModuleDestroy, OnApplicationShutdown {
 
   constructor(private readonly configService: ConfigService) {
     this.client = createClient({
-      url: configService.get<string>('REDIS_URL', 'redis://localhost:6379'),
+      url: configService.get<string>('REDIS_URL') || 'redis://localhost:6379',
     });
     this.client.on('error', (error) => {
       this.logger.error(

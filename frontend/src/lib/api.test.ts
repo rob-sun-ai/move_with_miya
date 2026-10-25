@@ -30,6 +30,17 @@ describe('api', () => {
     expect(headers.get('Content-Type')).toBe('application/json');
   });
 
+  it.each([
+    ['an empty 200', new Response('', { status: 200 })],
+    ['a 204', new Response(null, { status: 204 })],
+  ])('resolves %s without a body', async (_label, response) => {
+    vi.spyOn(global, 'fetch').mockResolvedValue(response);
+
+    await expect(
+      api('/api/locations/1', { method: 'DELETE' }),
+    ).resolves.toBeUndefined();
+  });
+
   it('normalizes array and scalar API errors', async () => {
     vi.spyOn(global, 'fetch').mockResolvedValue(
       new Response(

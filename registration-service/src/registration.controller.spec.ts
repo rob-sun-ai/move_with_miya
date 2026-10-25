@@ -23,6 +23,7 @@ describe('RegistrationController', () => {
         'updateRegistration',
         'deleteRegistration',
         'deleteClassRegistrations',
+        'deleteRegistrationByClassAndUser',
         'createContactSubmission',
         'getContactSubmissions',
         'markContactSubmissionRead',
@@ -138,22 +139,38 @@ describe('RegistrationController', () => {
 
   it('splits ids from update payloads before forwarding', async () => {
     service.updateRegistration.mockResolvedValue('updated');
-    service.createContactSubmission.mockResolvedValue('contact');
-    service.deleteRegistration.mockResolvedValue('deleted');
 
     await expect(
-      controller.updateRegistration({ id: 4, attended: true }),
+      controller.updateRegistration({ id: 4, cancellationReason: 'Injury' }),
     ).resolves.toBe('updated');
-    await expect(
-      controller.createContactSubmission({
-        name: 'Person',
-        email: 'person@example.com',
-        subject: 'Hi',
-        message: 'Hello',
-      }),
-    ).resolves.toBe('contact');
     expect(service.updateRegistration).toHaveBeenCalledWith(4, {
-      attended: true,
+      cancellationReason: 'Injury',
     });
+  });
+
+  it('forwards contact submissions', async () => {
+    const contact = {
+      name: 'Person',
+      email: 'person@example.com',
+      subject: 'Hi',
+      message: 'Hello',
+    };
+    service.createContactSubmission.mockResolvedValue('contact');
+
+    await expect(controller.createContactSubmission(contact)).resolves.toBe(
+      'contact',
+    );
+    expect(service.createContactSubmission).toHaveBeenCalledWith(contact);
+  });
+
+  it('rejects the legacy class/user delete instead of guessing capacity', async () => {
+    service.deleteRegistrationByClassAndUser.mockRejectedValue(
+      new Error('Registrations must be canceled, not deleted'),
+    );
+
+    await expect(controller.deleteRegistrationByClassAndUser()).rejects.toThrow(
+      'Registrations must be canceled, not deleted',
+    );
+    expect(service.cancelRegistrationByClassAndUser).not.toHaveBeenCalled();
   });
 });

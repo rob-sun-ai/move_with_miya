@@ -13,18 +13,13 @@ import GroupOutlinedIcon from '@mui/icons-material/GroupOutlined';
 import PlaceOutlinedIcon from '@mui/icons-material/PlaceOutlined';
 import { format, parseISO } from 'date-fns';
 import { useState } from 'react';
+import { formatCost, fullName } from '@/lib/format';
 import type { YogaClass } from '@/lib/types';
 
 interface ClassCardProps {
   cls: YogaClass;
   onOpen: (cls: YogaClass) => void;
   isRegistered?: boolean;
-}
-
-function formatCost(cost: string): string {
-  const amount = Number(cost);
-  if (Number.isNaN(amount) || amount === 0) return 'Free';
-  return `$${amount.toFixed(2)}`;
 }
 
 export default function ClassCard({
@@ -101,7 +96,7 @@ export default function ClassCard({
                       <Avatar
                         key={t.id}
                         src={t.avatarUrl ?? undefined}
-                        alt={`${t.firstName} ${t.lastName}`}
+                        alt={fullName(t)}
                       />
                     ))}
                   </AvatarGroup>
@@ -112,9 +107,7 @@ export default function ClassCard({
                 )}
                 {teachers.length > 0 && (
                   <Typography variant="body2" color="text.secondary">
-                    {teachers
-                      .map((t) => `${t.firstName} ${t.lastName}`.trim())
-                      .join(', ')}
+                    {teachers.map(fullName).join(', ')}
                   </Typography>
                 )}
               </Stack>

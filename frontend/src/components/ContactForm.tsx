@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Stack from '@mui/material/Stack';
@@ -9,9 +9,21 @@ import Typography from '@mui/material/Typography';
 import Script from 'next/script';
 import { api } from '@/lib/api';
 
+interface TurnstileOptions {
+  sitekey: string;
+  action: string;
+  appearance: 'always';
+  theme: 'auto';
+  'response-field-name': string;
+}
+
 declare global {
   interface Window {
-    turnstile?: { reset: () => void };
+    turnstile?: {
+      render: (container: HTMLElement, options: TurnstileOptions) => string;
+      reset: (widgetId?: string) => void;
+      remove: (widgetId: string) => void;
+    };
   }
 }
 
@@ -37,6 +49,8 @@ export default function ContactForm() {
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [contactChallenge, setContactChallenge] = useState('');
+  const turnstileContainer = useRef<HTMLDivElement>(null);
+  const turnstileWidget = useRef<string | null>(null);
 
   const loadContactChallenge = useCallback(async (reportError = true) => {
     try {
@@ -66,6 +80,39 @@ export default function ContactForm() {
       active = false;
     };
   }, []);
+
+  // Turnstile is rendered explicitly: its implicit mode only scans the page
+  // when the script first loads, so the widget would be missing after a
+  // client-side navigation back to this page. The script's onReady covers the
+  // first load; the effect covers remounts once the script is cached.
+  const renderTurnstile = useCallback(() => {
+    const container = turnstileContainer.current;
+    if (!turnstileSiteKey || !container || !window.turnstile) return;
+    if (turnstileWidget.current !== null) return;
+    turnstileWidget.current = window.turnstile.render(container, {
+      sitekey: turnstileSiteKey,
+      action: 'contact',
+      appearance: 'always',
+      theme: 'auto',
+      'response-field-name': 'turnstileToken',
+    });
+  }, []);
+
+  useEffect(() => {
+    renderTurnstile();
+    return () => {
+      if (turnstileWidget.current !== null) {
+        window.turnstile?.remove(turnstileWidget.current);
+        turnstileWidget.current = null;
+      }
+    };
+  }, [renderTurnstile]);
+
+  const resetTurnstile = () => {
+    if (turnstileWidget.current !== null) {
+      window.turnstile?.reset(turnstileWidget.current);
+    }
+  };
 
   const updateField = (field: keyof ContactFields, value: string) => {
     setFields((previous) => ({ ...previous, [field]: value }));
@@ -119,10 +166,10 @@ export default function ContactForm() {
       });
       setFields(initialFields);
       setSubmitted(true);
-      window.turnstile?.reset();
+      resetTurnstile();
       await loadContactChallenge();
     } catch (err) {
-      window.turnstile?.reset();
+      resetTurnstile();
       setError(err instanceof Error ? err.message : 'Could not send message.');
       setSubmitted(false);
       void loadContactChallenge(false);
@@ -152,17 +199,11 @@ export default function ContactForm() {
       {turnstileSiteKey ? (
         <>
           <Script
-            src="https://challenges.cloudflare.com/turnstile/v0/api.js"
+            src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
             strategy="afterInteractive"
+            onReady={renderTurnstile}
           />
-          <div
-            className="cf-turnstile"
-            data-sitekey={turnstileSiteKey}
-            data-action="contact"
-            data-appearance="always"
-            data-response-field-name="turnstileToken"
-            data-theme="auto"
-          />
+          <div ref={turnstileContainer} />
         </>
       ) : (
         <Alert severity="error">Contact verification is not configured.</Alert>

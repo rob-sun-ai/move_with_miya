@@ -1,0 +1,49 @@
+name: Node dependencies
+description: >-
+  Sets up Node and restores every package's node_modules and generated Prisma
+  clients from the cache. With install, builds and saves the cache on a miss;
+  without it, fails on a miss instead of running against missing modules.
+
+inputs:
+  install:
+    description: Install and cache the dependencies when the cache misses
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      with:
+        node-version: '22'
+
+    - id: cache
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          **/node_modules
+          **/src/generated
+        key: ${{ runner.os }}-node22-${{ hashFiles('**/package-lock.json', '**/prisma/schema.prisma') }}
+        fail-on-cache-miss: ${{ inputs.install != 'true' }}
+
+    - if: inputs.install == 'true' && steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        DATABASE_URL: postgresql://dummy:dummy@localhost:5432/dummy
+      run: |
+        # The root postinstall would `npm install` every package, ignoring
+        # their lockfiles; install each one with `npm ci` instead.
+        npm ci --ignore-scripts
+        for package in backend frontend user-service classes-service registration-service; do
+          npm ci --prefix "$package"
+        done
+        for service in user-service classes-service registration-service; do
+          (cd "$service" && npx prisma generate)
+        done
+
+    - if: inputs.install == 'true' && steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          **/node_modules
+          **/src/generated
+        key: ${{ steps.cache.outputs.cache-primary-key }}

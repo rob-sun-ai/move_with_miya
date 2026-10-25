@@ -1,11 +1,23 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { UsersService } from '../users/users.service';
 import type { User } from '../generated/prisma/client';
 import type { GoogleProfile } from '../users/interfaces/user.interface';
 
+// The OpenID Connect userinfo endpoint returns the stable `sub` identifier and
+// `email_verified`; the legacy oauth2/v2 endpoint returns `id` instead.
+const GOOGLE_USERINFO_URL = 'https://openidconnect.googleapis.com/v1/userinfo';
+
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly usersService: UsersService,
     private readonly configService: ConfigService,
@@ -24,7 +36,6 @@ export class AuthService {
       response_type: 'code',
       scope,
       state,
-      access_type: 'offline',
       prompt: 'select_account',
     });
 
@@ -48,9 +59,7 @@ export class AuthService {
     return '';
   }
 
-  async exchangeCode(
-    code: string,
-  ): Promise<{ accessToken: string; idToken: string }> {
+  async exchangeCode(code: string): Promise<{ accessToken: string }> {
     const clientId = this.configService.get<string>('GOOGLE_CLIENT_ID');
     const clientSecret = this.configService.get<string>('GOOGLE_CLIENT_SECRET');
     const redirectUri = this.configService.get<string>('GOOGLE_CALLBACK_URL');
@@ -72,19 +81,21 @@ export class AuthService {
     });
 
     if (!resp.ok) {
-      const error = await resp.text();
-      throw new UnauthorizedException(`Google token exchange failed: ${error}`);
+      // Google's error body is for operators, not for the browser.
+      this.logger.warn(
+        `Google token exchange failed (${resp.status}): ${await resp.text()}`,
+      );
+      throw new UnauthorizedException('Google sign-in failed');
     }
 
     const raw: unknown = await resp.json();
-    return {
-      accessToken: this.getJsonString(raw, 'access_token'),
-      idToken: this.getJsonString(raw, 'id_token'),
-    };
+    const accessToken = this.getJsonString(raw, 'access_token');
+    if (!accessToken) throw new UnauthorizedException('Google sign-in failed');
+    return { accessToken };
   }
 
   async fetchGoogleProfile(accessToken: string): Promise<GoogleProfile> {
-    const resp = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+    const resp = await fetch(GOOGLE_USERINFO_URL, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
 
@@ -93,19 +104,45 @@ export class AuthService {
     }
 
     const raw: unknown = await resp.json();
-    return {
+    const profile: GoogleProfile = {
       sub: this.getJsonString(raw, 'sub'),
       email: this.getJsonString(raw, 'email'),
       given_name: this.getJsonString(raw, 'given_name'),
       family_name: this.getJsonString(raw, 'family_name'),
       picture: this.getJsonString(raw, 'picture') || undefined,
     };
+    // Accounts are keyed by `sub` and matched by email, so both must be
+    // present and the email must be one Google has verified.
+    if (
+      !profile.sub ||
+      !profile.email ||
+      Reflect.get(raw as object, 'email_verified') !== true
+    ) {
+      throw new UnauthorizedException('Google account has no verified email');
+    }
+    return profile;
   }
 
   async findOrCreateUser(profile: GoogleProfile): Promise<User> {
     const existing = await this.usersService.findByGoogleId(profile.sub);
     if (existing) {
+      if (existing.banned) throw new ForbiddenException('User is banned');
       return this.usersService.updateLastLogin(existing.id);
+    }
+
+    const sameEmail = await this.usersService.findByEmail(profile.email);
+    if (sameEmail) {
+      // An email can move between Google accounts, so never hand an existing
+      // account to a different Google identity. Rows written before sign-in
+      // read `sub` from the right endpoint have an empty googleId; their owner
+      // is the verified holder of the email.
+      if (sameEmail.googleId !== '') {
+        throw new ConflictException(
+          'An account with this email is linked to a different Google account',
+        );
+      }
+      if (sameEmail.banned) throw new ForbiddenException('User is banned');
+      return this.usersService.linkGoogleAccount(sameEmail.id, profile.sub);
     }
 
     return this.usersService.create({

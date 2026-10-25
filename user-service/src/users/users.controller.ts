@@ -7,12 +7,10 @@ import {
   ParseEnumPipe,
   ParseUUIDPipe,
   Patch,
-  Post,
   Query,
   UseGuards,
 } from '@nestjs/common';
 import { UsersService } from './users.service';
-import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { AdminGuard } from '../common/guards/admin.guard';
 import { SelfOrAdminGuard } from '../common/guards/self-or-admin.guard';
@@ -22,10 +20,8 @@ import { UserRole } from '../generated/prisma/client';
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
-  @Post()
-  create(@Body() dto: CreateUserDto) {
-    return this.usersService.create(dto);
-  }
+  // Accounts are only created by Google sign-in (AuthService). A public
+  // create endpoint would let anyone claim an email address before its owner.
 
   @UseGuards(AdminGuard)
   @Get()
@@ -34,11 +30,15 @@ export class UsersController {
   }
 
   @Get('batch')
-  async findByIds(@Query('ids') ids: string) {
-    const idList = ids
-      .split(',')
-      .map((id) => id.trim())
-      .filter(Boolean);
+  async findByIds(@Query('ids') ids?: string) {
+    const idList = [
+      ...new Set(
+        (typeof ids === 'string' ? ids : '')
+          .split(',')
+          .map((id) => id.trim())
+          .filter(Boolean),
+      ),
+    ];
     const users = await this.usersService.findByIds(idList);
     return users.map(({ id, firstName, lastName, avatarUrl, role }) => ({
       id,
