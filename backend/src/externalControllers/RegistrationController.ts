@@ -1,10 +1,12 @@
 import {
   Body,
+  ConflictException,
   Controller,
   ForbiddenException,
   Delete,
   Get,
   Inject,
+  Logger,
   NotFoundException,
   Param,
   ParseIntPipe,
@@ -14,13 +16,21 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
   UseGuards,
+  Optional,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { ClientProxy } from '@nestjs/microservices';
-import { lastValueFrom } from 'rxjs';
 import { AdminGuard } from '../common/guards/admin.guard';
 import { StaffGuard } from '../common/guards/staff.guard';
 import { sendRpc } from '../common/rpc';
+import {
+  fetchActiveUser,
+  fetchUserSummaries,
+  type UserSummary,
+  userServiceUrl,
+} from '../common/user-verification';
+import { StripeService } from './stripe.service';
+import { CancelRegistrationDto } from './dto/cancel-registration.dto';
 import { UpdateRegistrationDto } from './dto/update-registration.dto';
 
 interface Registration {
@@ -29,7 +39,7 @@ interface Registration {
   classId: number;
   status: string;
   registeredAt: string;
-  user?: Record<string, unknown> | null;
+  user?: UserSummary | null;
   class?: {
     id: number;
     name: string;
@@ -47,12 +57,62 @@ interface ClassSummary {
 
 @Controller('registration')
 export class RegistrationController {
+  private readonly logger = new Logger(RegistrationController.name);
+
   constructor(
     @Inject('REGISTRATION_SERVICE')
     private readonly registrationClient: ClientProxy,
     @Inject('CLASSES_SERVICE')
     private readonly classesClient: ClientProxy,
+    @Optional() private readonly stripeService?: StripeService,
   ) {}
+
+  /**
+   * Refund percentage owed to a member cancelling now: the tier with the
+   * largest threshold that is still ahead of the class start. Undefined once
+   * the cancellation cutoff has passed.
+   */
+  private refundPercentageForMemberCancellation(
+    startDate: string,
+    cls: {
+      cancellationCutoffHours?: number;
+      refundPolicy?: Array<{ hoursBeforeStart: number; percentage: number }>;
+    },
+  ) {
+    const cutoffHours = cls.cancellationCutoffHours ?? 24;
+    const startTime = new Date(startDate).getTime();
+    const cutoff = startTime - cutoffHours * 3_600_000;
+    if (Date.now() >= cutoff) return undefined;
+    const hoursUntilStart = (startTime - Date.now()) / 3_600_000;
+    const tiers = (
+      cls.refundPolicy ?? [{ hoursBeforeStart: cutoffHours, percentage: 100 }]
+    ).filter(
+      (tier) =>
+        Number.isInteger(tier.hoursBeforeStart) &&
+        Number.isInteger(tier.percentage) &&
+        tier.hoursBeforeStart <= hoursUntilStart,
+    );
+    if (tiers.length === 0) return 0;
+    return tiers.sort((a, b) => b.hoursBeforeStart - a.hoursBeforeStart)[0]
+      .percentage;
+  }
+
+  /**
+   * The cancellation has already committed and queued the refund. A failed
+   * Stripe call is retried by StripeService's refund sweep, so it must not
+   * fail the request.
+   */
+  private async refundAfterCancellation(paymentId: string) {
+    try {
+      await this.stripeService?.refundPayment(paymentId);
+    } catch (error) {
+      this.logger.warn(
+        `Refund for payment ${paymentId.slice(0, 8)} will be retried: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
 
   private rpc<T = unknown>(cmd: string, payload: object) {
     return sendRpc<T>(
@@ -63,30 +123,27 @@ export class RegistrationController {
     );
   }
 
-  private rpcClasses<T = unknown>(cmd: string, payload: object) {
-    return sendRpc<T>(
+  private getClass(classId: number) {
+    return sendRpc<{
+      id: number;
+      capacity?: number;
+      startDate?: string;
+      endDate?: string;
+      status?: string;
+      isPrivate?: boolean;
+      cost?: string | number;
+      waitlistEnabled?: boolean;
+      cancellationCutoffHours?: number;
+      refundPolicy?: Array<{
+        hoursBeforeStart: number;
+        percentage: number;
+      }>;
+    } | null>(
       this.classesClient,
-      cmd,
-      payload,
+      'get_class',
+      { id: classId },
       'Class service unavailable',
     );
-  }
-
-  private async getClass(classId: number) {
-    try {
-      return await lastValueFrom<{
-        id: number;
-        capacity?: number;
-        startDate?: string;
-        endDate?: string;
-        status?: string;
-        isPrivate?: boolean;
-        waitlistEnabled?: boolean;
-        cancellationCutoffHours?: number;
-      } | null>(this.classesClient.send({ cmd: 'get_class' }, { id: classId }));
-    } catch {
-      throw new ServiceUnavailableException('Class service unavailable');
-    }
   }
 
   /**
@@ -100,26 +157,15 @@ export class RegistrationController {
     const userIds = withUsers
       ? [...new Set(registrations.map((r) => r.userId).filter(Boolean))]
       : [];
-    const userServiceUrl =
-      process.env.USER_SERVICE_URL || 'http://localhost:3003';
 
     const [users, classes] = await Promise.all([
-      userIds.length === 0
-        ? Promise.resolve([] as Record<string, unknown>[])
-        : fetch(
-            `${userServiceUrl}/users/batch?ids=${encodeURIComponent(
-              userIds.join(','),
-            )}`,
-            { cache: 'no-store' },
-          ).then(async (res) =>
-            res.ok ? ((await res.json()) as Record<string, unknown>[]) : [],
-          ),
-      this.rpcClasses<ClassSummary[]>('get_classes', {}).catch(
+      fetchUserSummaries(userServiceUrl(), userIds),
+      sendRpc<ClassSummary[]>(this.classesClient, 'get_classes', {}).catch(
         (): ClassSummary[] => [],
       ),
     ]);
 
-    const userMap = new Map(users.map((u) => [String(u.id), u]));
+    const userMap = new Map(users.map((u) => [u.id, u]));
     const classMap = new Map(classes.map((cls) => [cls.id, cls]));
     return registrations.map((registration) => ({
       ...registration,
@@ -210,6 +256,13 @@ export class RegistrationController {
     if (cls.endDate && new Date(cls.endDate).getTime() <= Date.now()) {
       throw new ForbiddenException('This class has already ended');
     }
+    const cost = Number(cls.cost ?? 0);
+    if (!Number.isFinite(cost) || cost < 0) {
+      throw new ServiceUnavailableException('Class price is invalid');
+    }
+    if (cost > 0) {
+      throw new ConflictException('Paid classes require Stripe Checkout');
+    }
     const capacity = cls.capacity;
     if (
       capacity === undefined ||
@@ -219,29 +272,7 @@ export class RegistrationController {
       throw new ServiceUnavailableException('Class capacity is invalid');
     }
 
-    const userServiceUrl =
-      process.env.USER_SERVICE_URL || 'http://localhost:3003';
-    let userResponse: Response;
-    try {
-      userResponse = await fetch(`${userServiceUrl}/users/${userId}`, {
-        signal: AbortSignal.timeout(5000),
-      });
-    } catch {
-      throw new ServiceUnavailableException('User service unreachable');
-    }
-    if (userResponse.status >= 500) {
-      throw new ServiceUnavailableException('User service error');
-    }
-    if (!userResponse.ok) {
-      throw new UnauthorizedException('Unable to verify user');
-    }
-    const user = (await userResponse.json()) as {
-      banned?: boolean;
-      yogaExperience?: string | null;
-    };
-    if (user.banned) {
-      throw new ForbiddenException('User is banned');
-    }
+    const user = await fetchActiveUser(userServiceUrl(), userId);
     if (cls.isPrivate && !user.yogaExperience?.trim()) {
       throw new ForbiddenException(
         'Yoga experience is required for this class',
@@ -284,21 +315,32 @@ export class RegistrationController {
     if (!cls || cls.capacity === undefined || !cls.startDate) {
       throw new NotFoundException(`Class ${classId} not found`);
     }
-    return this.rpc<Registration>('cancel_registration_by_class_and_user', {
-      classId,
-      userId,
-      capacity: cls.capacity,
-      classStartAt: cls.startDate,
-      cancellationCutoffHours: cls.cancellationCutoffHours ?? 24,
-      source: 'member',
-    });
+    const result = await this.rpc<Registration & { refundPaymentId?: string }>(
+      'cancel_registration_by_class_and_user',
+      {
+        classId,
+        userId,
+        capacity: cls.capacity,
+        classStartAt: cls.startDate,
+        cancellationCutoffHours: cls.cancellationCutoffHours ?? 24,
+        source: 'member',
+        refundPercentage: this.refundPercentageForMemberCancellation(
+          cls.startDate,
+          cls,
+        ),
+      },
+    );
+    if (result.refundPaymentId) {
+      await this.refundAfterCancellation(result.refundPaymentId);
+    }
+    return result;
   }
 
   @UseGuards(AdminGuard)
   @Post(':id/cancel')
   async cancelRegistration(
     @Param('id', ParseIntPipe) id: number,
-    @Body() body: { reason?: string },
+    @Body() body: CancelRegistrationDto,
   ) {
     const registration = await this.rpc<Registration>('get_registration', {
       id,
@@ -307,14 +349,22 @@ export class RegistrationController {
     if (!cls || cls.capacity === undefined) {
       throw new NotFoundException(`Class ${registration.classId} not found`);
     }
-    return this.rpc<Registration>('cancel_registration', {
-      id,
-      capacity: cls.capacity,
-      classStartAt: cls.startDate,
-      cancellationCutoffHours: cls.cancellationCutoffHours ?? 24,
-      source: 'admin',
-      reason: body.reason?.trim() || 'Admin cancellation',
-    });
+    const result = await this.rpc<Registration & { refundPaymentId?: string }>(
+      'cancel_registration',
+      {
+        id,
+        capacity: cls.capacity,
+        classStartAt: cls.startDate,
+        cancellationCutoffHours: cls.cancellationCutoffHours ?? 24,
+        source: 'admin',
+        reason: body.reason?.trim() || 'Admin cancellation',
+        refundPercentage: body.refundPercentage ?? 100,
+      },
+    );
+    if (result.refundPaymentId) {
+      await this.refundAfterCancellation(result.refundPaymentId);
+    }
+    return result;
   }
 
   @UseGuards(AdminGuard)
@@ -330,18 +380,5 @@ export class RegistrationController {
   @Delete(':id')
   cancelRegistrationLegacy(@Param('id', ParseIntPipe) id: number) {
     return this.cancelRegistration(id, {});
-  }
-
-  @UseGuards(AdminGuard)
-  @Post('class/:classId/cancel')
-  cancelClassRegistrations(
-    @Param('classId', ParseIntPipe) classId: number,
-    @Body() body: { reason?: string },
-  ) {
-    return this.rpc('cancel_class_registrations', {
-      classId,
-      reason: body.reason?.trim() || 'Class canceled',
-      source: 'class-cancellation',
-    });
   }
 }

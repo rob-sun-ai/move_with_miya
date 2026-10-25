@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { ValidationPipe } from '@nestjs/common';
 import { RegistrationController } from './RegistrationController';
+import { CancelRegistrationDto } from './dto/cancel-registration.dto';
 import { UpdateRegistrationDto } from './dto/update-registration.dto';
 
 jest.mock('../common/guards/admin.guard', () => ({
@@ -152,6 +153,51 @@ describe('RegistrationController', () => {
         },
       );
     });
+
+    it('rejects direct registration for paid classes', async () => {
+      classesClient.send.mockReturnValue(
+        of({
+          id: 1,
+          capacity: 10,
+          cost: '15.00',
+          endDate: '2099-01-01T00:00:00.000Z',
+        }),
+      );
+
+      await expect(
+        controller.createRegistration(
+          buildRequest(sessionUserId),
+          1,
+          sessionUserId,
+        ),
+      ).rejects.toMatchObject({
+        message: 'Paid classes require Stripe Checkout',
+      });
+      expect(client.send).not.toHaveBeenCalled();
+    });
+
+    it.each(['free', '-5', 'NaN'])(
+      'rejects direct registration for a class priced %p',
+      async (cost) => {
+        classesClient.send.mockReturnValue(
+          of({
+            id: 1,
+            capacity: 10,
+            cost,
+            endDate: '2099-01-01T00:00:00.000Z',
+          }),
+        );
+
+        await expect(
+          controller.createRegistration(
+            buildRequest(sessionUserId),
+            1,
+            sessionUserId,
+          ),
+        ).rejects.toMatchObject({ message: 'Class price is invalid' });
+        expect(client.send).not.toHaveBeenCalled();
+      },
+    );
 
     it('forbids registration for an ended class', async () => {
       classesClient.send.mockReturnValue(
@@ -386,6 +432,30 @@ describe('RegistrationController', () => {
       await expect(
         pipe.transform({ cancellationReason: 4 }, metadata),
       ).rejects.toThrow(BadRequestException);
+    });
+  });
+
+  describe('admin cancellation input', () => {
+    const metadata = {
+      type: 'body' as const,
+      metatype: CancelRegistrationDto,
+    };
+    const pipe = new ValidationPipe({ whitelist: true, transform: true });
+
+    it('treats a missing body as no options', async () => {
+      await expect(pipe.transform(undefined, metadata)).resolves.toEqual({});
+    });
+
+    it.each([
+      { reason: 42 },
+      { refundPercentage: 101 },
+      { refundPercentage: -1 },
+      { refundPercentage: 12.5 },
+      { refundPercentage: '50' },
+    ])('rejects %p', async (body) => {
+      await expect(pipe.transform(body, metadata)).rejects.toThrow(
+        BadRequestException,
+      );
     });
   });
 });

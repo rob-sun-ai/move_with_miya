@@ -5,6 +5,7 @@ import {
   Controller,
   Delete,
   Get,
+  HttpException,
   Inject,
   Param,
   ParseIntPipe,
@@ -13,19 +14,18 @@ import {
   Query,
   NotFoundException,
   UseGuards,
+  Optional,
 } from '@nestjs/common';
 import { ClientProxy } from '@nestjs/microservices';
 import { AdminGuard } from '../common/guards/admin.guard';
 import { sendRpc } from '../common/rpc';
+import {
+  fetchUserSummaries,
+  type UserSummary,
+  userServiceUrl,
+} from '../common/user-verification';
+import { StripeService } from './stripe.service';
 import { CancelClassDto } from './dto/cancel-class.dto';
-
-interface Teacher {
-  id: string;
-  firstName: string;
-  lastName: string;
-  avatarUrl?: string | null;
-  role: string;
-}
 
 interface ClassRecord {
   id: number;
@@ -51,6 +51,7 @@ export class ClassesController {
     @Inject('CLASSES_SERVICE') private readonly classesClient: ClientProxy,
     @Inject('REGISTRATION_SERVICE')
     private readonly registrationClient: ClientProxy,
+    @Optional() private readonly stripeService?: StripeService,
   ) {}
 
   private rpcClasses<T = unknown>(cmd: string, payload: object) {
@@ -75,30 +76,16 @@ export class ClassesController {
     if (classes.length === 0) return classes;
 
     const classIds = classes.map((c) => c.id);
-    const [countRows, teacherIds] = await Promise.all([
+    const teacherIds = [...new Set(classes.flatMap((c) => c.teacherIds ?? []))];
+    const [countRows, teachers] = await Promise.all([
       this.rpcRegistrations<{ classId: number; count: number }[]>(
         'get_registration_counts',
         { classIds },
       ),
-      Promise.resolve([...new Set(classes.flatMap((c) => c.teacherIds ?? []))]),
+      fetchUserSummaries(userServiceUrl(), teacherIds),
     ]);
 
     const counts = new Map(countRows.map((r) => [r.classId, r.count]));
-
-    let teachers: Teacher[] = [];
-    if (teacherIds.length > 0) {
-      const userServiceUrl =
-        process.env.USER_SERVICE_URL || 'http://localhost:3003';
-      const res = await fetch(
-        `${userServiceUrl}/users/batch?ids=${encodeURIComponent(
-          teacherIds.join(','),
-        )}`,
-        { cache: 'no-store' },
-      );
-      if (res.ok) {
-        teachers = (await res.json()) as Teacher[];
-      }
-    }
     const teacherMap = new Map(teachers.map((t) => [t.id, t]));
 
     return classes.map((cls) => ({
@@ -106,7 +93,7 @@ export class ClassesController {
       registrationCount: counts.get(cls.id) ?? 0,
       teachers: (cls.teacherIds ?? [])
         .map((id) => teacherMap.get(id))
-        .filter((t): t is Teacher => t !== undefined),
+        .filter((t): t is UserSummary => t !== undefined),
     }));
   }
 
@@ -166,16 +153,23 @@ export class ClassesController {
         source: 'class-cancellation',
       });
     } catch (error) {
-      // The databases are separate. Compensate when the dependent lifecycle
-      // operation cannot be completed so the class is not left half-canceled.
-      try {
-        await this.rpcClasses('update_class', { id, status: cls.status });
-      } catch {
-        // The original error remains the useful response; reconciliation can
-        // retry the class-wide cancellation if compensation also fails.
+      // The databases are separate. Compensate when the registration service
+      // rejected the operation so the class is not left half-canceled. After
+      // a timeout or outage the queued request may still run later, so the
+      // class stays canceled for the admin to retry (retries are idempotent).
+      if (error instanceof HttpException && error.getStatus() < 500) {
+        try {
+          await this.rpcClasses('update_class', { id, status: cls.status });
+        } catch {
+          // The original error remains the useful response; reconciliation
+          // can retry the class-wide cancellation if compensation also fails.
+        }
       }
       throw error;
     }
+    // Refund queueing is idempotent, so an admin can retry the cancellation
+    // if this step fails.
+    if (this.stripeService) await this.stripeService.refundClassPayments(id);
     return updated;
   }
 

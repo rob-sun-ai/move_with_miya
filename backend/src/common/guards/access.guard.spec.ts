@@ -48,7 +48,7 @@ describe('backend access guards', () => {
       jest.spyOn(global, 'fetch').mockResolvedValue(response({}, 404));
 
       await expect(makeGuard().canActivate(context('user-1'))).rejects.toThrow(
-        'Failed to verify user',
+        'Unable to verify user',
       );
     });
 

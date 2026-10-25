@@ -1,7 +1,8 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ClientProxy } from '@nestjs/microservices';
 import { ConfigService } from '@nestjs/config';
-import { lastValueFrom } from 'rxjs';
+import { sendRpc } from '../common/rpc';
+import { userServiceUrl } from '../common/user-verification';
 
 interface RegistrationEvent {
   eventKey: string;
@@ -34,28 +35,21 @@ export class RegistrationNotificationService {
     @Inject('CLASSES_SERVICE') private readonly classes: ClientProxy,
   ) {}
 
-  async claim(eventKey: string): Promise<boolean> {
-    return lastValueFrom(
-      this.registrations.send<boolean>(
-        { cmd: 'claim_notification' },
-        { eventKey },
-      ),
-    );
+  claim(eventKey: string): Promise<boolean> {
+    return sendRpc<boolean>(this.registrations, 'claim_notification', {
+      eventKey,
+    });
   }
 
   complete(eventKey: string) {
-    return lastValueFrom(
-      this.registrations.send({ cmd: 'complete_notification' }, { eventKey }),
-    );
+    return sendRpc(this.registrations, 'complete_notification', { eventKey });
   }
 
   fail(eventKey: string, error: string) {
-    return lastValueFrom(
-      this.registrations.send(
-        { cmd: 'fail_notification' },
-        { eventKey, error },
-      ),
-    );
+    return sendRpc(this.registrations, 'fail_notification', {
+      eventKey,
+      error,
+    });
   }
 
   async deliver(event: RegistrationEvent) {
@@ -68,10 +62,9 @@ export class RegistrationNotificationService {
       return;
     }
 
-    const userServiceUrl =
-      this.config.get<string>('USER_SERVICE_URL') || 'http://localhost:3003';
+    const baseUrl = userServiceUrl(this.config.get<string>('USER_SERVICE_URL'));
     const userResponse = await fetch(
-      `${userServiceUrl}/users/${encodeURIComponent(event.payload.userId)}`,
+      `${baseUrl}/users/${encodeURIComponent(event.payload.userId)}`,
       { signal: AbortSignal.timeout(5000) },
     );
     if (!userResponse.ok)
@@ -79,9 +72,9 @@ export class RegistrationNotificationService {
     const user = (await userResponse.json()) as UserRecord;
     if (!user.email) throw new Error('Registration recipient has no email');
 
-    const cls = await lastValueFrom<ClassRecord | null>(
-      this.classes.send({ cmd: 'get_class' }, { id: event.payload.classId }),
-    );
+    const cls = await sendRpc<ClassRecord | null>(this.classes, 'get_class', {
+      id: event.payload.classId,
+    });
     const className = cls?.name ?? `Class ${event.payload.classId}`;
     const subject = this.subject(event.eventType, className);
     const text = this.body(event, user, className, cls);
